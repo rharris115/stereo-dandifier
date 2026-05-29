@@ -27,7 +27,11 @@ def read_exif(image: Image.Image) -> dict[str, str]:
 
 def normalise_exif_value(value) -> str:
     if isinstance(value, bytes):
-        encodings = ("utf-16-le", "utf-8", "latin-1") if b"\x00" in value else ("utf-8", "latin-1")
+        encodings = (
+            ("utf-16-le", "utf-8", "latin-1")
+            if b"\x00" in value
+            else ("utf-8", "latin-1")
+        )
         for encoding in encodings:
             try:
                 return value.decode(encoding).strip("\x00 ")

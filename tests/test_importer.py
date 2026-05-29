@@ -37,7 +37,9 @@ def test_multi_frame_file_imports_selectable_project_images(tmp_path):
     assert images[1].source.getpixel((0, 0)) == (0, 0, 255)
 
 
-def test_dng_import_uses_raw_preview_and_raw_render_when_rawpy_is_available(tmp_path, monkeypatch):
+def test_dng_import_uses_raw_preview_and_raw_render_when_rawpy_is_available(
+    tmp_path, monkeypatch
+):
     path = tmp_path / "image.dng"
     path.write_bytes(b"not a real dng")
 

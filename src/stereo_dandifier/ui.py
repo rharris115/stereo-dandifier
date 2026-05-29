@@ -25,7 +25,6 @@ from PySide6.QtWidgets import (
     QSlider,
     QSplitter,
     QStatusBar,
-    QTabWidget,
     QToolBar,
     QVBoxLayout,
     QWidget,
@@ -34,7 +33,6 @@ from PySide6.QtWidgets import (
 from stereo_dandifier.formats import CARD_FORMATS, format_particulars
 from stereo_dandifier.image_ops import (
     apply_style,
-    make_cross_eyed,
     render_card,
     score_comfort,
     split_stereo_pair,
@@ -65,7 +63,9 @@ class ZoomableImageView(QGraphicsView):
         self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
         self.setFrameShape(QGraphicsView.Shape.StyledPanel)
         self.setObjectName("preview")
-        self.setRenderHints(QPainter.RenderHint.Antialiasing | QPainter.RenderHint.SmoothPixmapTransform)
+        self.setRenderHints(
+            QPainter.RenderHint.Antialiasing | QPainter.RenderHint.SmoothPixmapTransform
+        )
         self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
         self.setResizeAnchor(QGraphicsView.ViewportAnchor.AnchorViewCenter)
         self.setMinimumSize(360, 320)
@@ -209,13 +209,8 @@ class StereoDandifierWindow(QMainWindow):
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(14, 12, 14, 12)
 
-        self.tabs = QTabWidget()
-        self.source_view = ZoomableImageView("Import an SBS stereo image to begin")
-        self.card_view = ZoomableImageView("Card preview")
-
-        self.tabs.addTab(self.source_view, "Source")
-        self.tabs.addTab(self.card_view, "Card Preview")
-        layout.addWidget(self.tabs)
+        self.card_view = ZoomableImageView("Import an SBS stereo image to begin")
+        layout.addWidget(self.card_view)
 
         return panel
 
@@ -271,8 +266,12 @@ class StereoDandifierWindow(QMainWindow):
         self.tone_mode.currentTextChanged.connect(self._tone_mode_changed)
         self.brightness = self._make_slider(-50, 50, 0)
         self.contrast = self._make_slider(-50, 50, 0)
-        self.saturation_label, self.saturation = self._add_slider_row(style_layout, "Saturation", -50, 50, 0)
-        self.sepia_strength_label, self.sepia_strength = self._add_slider_row(style_layout, "Sepia Strength", 0, 100, 45)
+        self.saturation_label, self.saturation = self._add_slider_row(
+            style_layout, "Saturation", -50, 50, 0
+        )
+        self.sepia_strength_label, self.sepia_strength = self._add_slider_row(
+            style_layout, "Sepia Strength", 0, 100, 45
+        )
         style_layout.insertRow(0, "Mode", self.tone_mode)
         style_layout.insertRow(1, "Brightness", self.brightness)
         style_layout.insertRow(2, "Contrast", self.contrast)
@@ -416,7 +415,9 @@ class StereoDandifierWindow(QMainWindow):
             try:
                 project_images = load_project_images(path)
             except Exception as exc:
-                QMessageBox.warning(self, "Import failed", f"Could not open {path.name}: {exc}")
+                QMessageBox.warning(
+                    self, "Import failed", f"Could not open {path.name}: {exc}"
+                )
                 continue
 
             for project_image in project_images:
@@ -436,7 +437,9 @@ class StereoDandifierWindow(QMainWindow):
 
         item = QListWidgetItem(project_image.display_name)
         item.setIcon(pixmap)
-        item.setToolTip(f"{project_image.path}\nFrame {project_image.frame_index + 1} of {project_image.frame_count}")
+        item.setToolTip(
+            f"{project_image.path}\nFrame {project_image.frame_index + 1} of {project_image.frame_count}"
+        )
         self.library.addItem(item)
 
     def _select_image(self, index: int):
@@ -445,7 +448,6 @@ class StereoDandifierWindow(QMainWindow):
 
         self.current_index = index
         self.export_action.setEnabled(True)
-        self.source_view.fit_to_view()
         self.card_view.fit_to_view()
 
         self._load_controls()
@@ -483,9 +485,24 @@ class StereoDandifierWindow(QMainWindow):
             self._update_tone_controls(mode)
             return
         defaults = {
-            "Colour": {"brightness": 0, "contrast": 4, "saturation": 8, "sepia_strength": 45},
-            "Black and White": {"brightness": 0, "contrast": 16, "saturation": 0, "sepia_strength": 45},
-            "Sepia": {"brightness": 2, "contrast": 8, "saturation": 0, "sepia_strength": 55},
+            "Colour": {
+                "brightness": 0,
+                "contrast": 4,
+                "saturation": 8,
+                "sepia_strength": 45,
+            },
+            "Black and White": {
+                "brightness": 0,
+                "contrast": 16,
+                "saturation": 0,
+                "sepia_strength": 45,
+            },
+            "Sepia": {
+                "brightness": 2,
+                "contrast": 8,
+                "saturation": 0,
+                "sepia_strength": 55,
+            },
         }
         self._updating_controls = True
         self.brightness.setValue(defaults[mode]["brightness"])
@@ -547,10 +564,8 @@ class StereoDandifierWindow(QMainWindow):
         styled_left = apply_style(pair[0], current.settings)
         styled_right = apply_style(pair[1], current.settings)
 
-        source_preview = make_cross_eyed(source) if current.settings.swap_eyes else source
         card = render_card(styled_left, styled_right, current.settings)
 
-        self.source_view.set_image(source_preview, reset_view=reset_view)
         self.card_view.set_image(card, reset_view=reset_view)
         self._set_comfort(score_comfort(source, current.settings))
 

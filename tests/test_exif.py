@@ -8,7 +8,9 @@ def test_normalise_utf16_exif_bytes():
 
 
 def test_suggest_caption_prefers_description():
-    caption = suggest_caption(Path("IMG_0001.jpg"), {"ImageDescription": "Village cricket"})
+    caption = suggest_caption(
+        Path("IMG_0001.jpg"), {"ImageDescription": "Village cricket"}
+    )
 
     assert caption == "Village cricket"
 

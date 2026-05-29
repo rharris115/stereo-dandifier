@@ -4,7 +4,9 @@ from stereo_dandifier.formats import CARD_FORMATS, mm_pair_to_px, mm_to_px
 from stereo_dandifier.models import RenderSettings
 
 
-def split_stereo_pair(image: Image.Image, settings: RenderSettings) -> tuple[Image.Image, Image.Image]:
+def split_stereo_pair(
+    image: Image.Image, settings: RenderSettings
+) -> tuple[Image.Image, Image.Image]:
     width, height = image.size
     midpoint = width // 2
     left = image.crop((0, 0, midpoint, height))
@@ -25,15 +27,6 @@ def horizontal_shift(image: Image.Image, pixels: int) -> Image.Image:
     shifted = Image.new("RGB", image.size, (245, 241, 232))
     shifted.paste(image, (pixels, 0))
     return shifted
-
-
-def make_cross_eyed(image: Image.Image) -> Image.Image:
-    settings = RenderSettings(swap_eyes=True)
-    left, right = split_stereo_pair(image, settings)
-    output = Image.new("RGB", image.size)
-    output.paste(left, (0, 0))
-    output.paste(right, (image.size[0] // 2, 0))
-    return output
 
 
 def apply_style(image: Image.Image, settings: RenderSettings) -> Image.Image:
@@ -63,7 +56,9 @@ def apply_style(image: Image.Image, settings: RenderSettings) -> Image.Image:
     return styled
 
 
-def render_card(left: Image.Image, right: Image.Image, settings: RenderSettings) -> Image.Image:
+def render_card(
+    left: Image.Image, right: Image.Image, settings: RenderSettings
+) -> Image.Image:
     spec = CARD_FORMATS[settings.layout_template]
     card_w, card_h = mm_pair_to_px(spec["card_mm"])
     image_w, image_h = mm_pair_to_px(spec["image_mm"])
@@ -110,13 +105,17 @@ def fit_to_box(image: Image.Image, box_w: int, box_h: int) -> Image.Image:
     return fitted
 
 
-def paste_with_border(card: Image.Image, image: Image.Image, x: int, y: int, box_w: int, box_h: int):
+def paste_with_border(
+    card: Image.Image, image: Image.Image, x: int, y: int, box_w: int, box_h: int
+):
     draw = ImageDraw.Draw(card)
     draw.rectangle((x - 8, y - 8, x + box_w + 8, y + box_h + 8), fill=(232, 221, 200))
     image_x = x + (box_w - image.width) // 2
     image_y = y + (box_h - image.height) // 2
     card.paste(image, (image_x, image_y))
-    draw.rectangle((x - 8, y - 8, x + box_w + 8, y + box_h + 8), outline=(112, 94, 68), width=3)
+    draw.rectangle(
+        (x - 8, y - 8, x + box_w + 8, y + box_h + 8), outline=(112, 94, 68), width=3
+    )
 
 
 def score_comfort(image: Image.Image, settings: RenderSettings) -> str:
