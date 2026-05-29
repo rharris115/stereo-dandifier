@@ -7,6 +7,10 @@ def test_mm_to_px_uses_300_dpi():
     assert mm_to_px(25.4) == 300
 
 
+def test_mm_to_px_accepts_custom_dpi():
+    assert mm_to_px(25.4, dpi=600) == 600
+
+
 @pytest.mark.parametrize("name", CARD_FORMATS)
 def test_all_formats_have_particulars(name):
     particulars = format_particulars(name)

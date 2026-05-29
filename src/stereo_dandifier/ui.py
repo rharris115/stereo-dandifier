@@ -33,13 +33,16 @@ from PySide6.QtWidgets import (
 from stereo_dandifier.formats import CARD_FORMATS, format_particulars
 from stereo_dandifier.image_ops import (
     apply_style,
+    export_dpi_for_source,
     render_card,
+    render_print_preview,
+    save_pdf,
     score_comfort,
     split_stereo_pair,
 )
 from stereo_dandifier.importer import load_project_images
 from stereo_dandifier.models import ProjectImage, RenderSettings
-
+from stereo_dandifier.print_layout import default_page_layout, page_layout_for_name
 
 SUPPORTED_IMAGE_FILTER = "Images (*.jpg *.jpeg *.png *.dng *.mpo *.tif *.tiff)"
 
@@ -50,6 +53,9 @@ class ZoomableImageView(QGraphicsView):
 
         self._scene = QGraphicsScene(self)
         self._pixmap_item = QGraphicsPixmapItem()
+        self._pixmap_item.setTransformationMode(
+            Qt.TransformationMode.SmoothTransformation
+        )
         self._placeholder = QGraphicsTextItem(placeholder)
         self._placeholder.setDefaultTextColor(Qt.GlobalColor.darkGray)
         self._zoom = 0
@@ -129,6 +135,7 @@ class StereoDandifierWindow(QMainWindow):
         self.images: list[ProjectImage] = []
         self.current_index: int | None = None
         self._updating_controls = False
+        self.page_layout = default_page_layout()
 
         self._build_ui()
         self._apply_app_style()
@@ -157,7 +164,7 @@ class StereoDandifierWindow(QMainWindow):
         self.import_action = QAction("Import Images", self)
         self.import_action.triggered.connect(self.import_images)
 
-        self.export_action = QAction("Export Card", self)
+        self.export_action = QAction("Export PDF", self)
         self.export_action.setEnabled(False)
         self.export_action.triggered.connect(self.export_card)
 
@@ -180,8 +187,12 @@ class StereoDandifierWindow(QMainWindow):
 
         self.comfort_label = QLabel()
         self.comfort_label.setObjectName("comfortLabel")
+        self.paper_label = QLabel(f"Paper: {self.page_layout.name}")
+        self.paper_label.setObjectName("paperLabel")
+        self.paper_label.setToolTip(self.page_layout.source)
         toolbar.addSeparator()
         toolbar.addWidget(self.comfort_label)
+        toolbar.addWidget(self.paper_label)
 
     def _build_library(self) -> QWidget:
         panel = QWidget()
@@ -236,6 +247,26 @@ class StereoDandifierWindow(QMainWindow):
         image_layout.addRow(auto_rectify)
         layout.addWidget(image_group)
 
+        paper_group = QGroupBox("Paper")
+        paper_layout = QFormLayout(paper_group)
+        self.paper_choice = QComboBox()
+        self.paper_choice.addItems(["A4", "Letter"])
+        if self.page_layout.name not in {"A4", "Letter"}:
+            self.paper_choice.addItem(self.page_layout.name)
+        self.paper_choice.setCurrentText(self.page_layout.name)
+        self.paper_choice.currentTextChanged.connect(self._paper_choice_changed)
+        self.paper_size_label = QLabel()
+        self.paper_dpi_label = QLabel()
+        self.paper_source_label = QLabel()
+        self.paper_source_label.setWordWrap(True)
+        self.paper_source_label.setObjectName("hintText")
+        paper_layout.addRow("Size", self.paper_choice)
+        paper_layout.addRow("Dimensions", self.paper_size_label)
+        paper_layout.addRow("DPI", self.paper_dpi_label)
+        paper_layout.addRow(self.paper_source_label)
+        self._update_paper_controls()
+        layout.addWidget(paper_group)
+
         card_group = QGroupBox("Card")
         card_layout = QFormLayout(card_group)
         self.layout_template = QComboBox()
@@ -278,13 +309,6 @@ class StereoDandifierWindow(QMainWindow):
         self._update_tone_controls(self.tone_mode.currentText())
         layout.addWidget(style_group)
 
-        export_group = QGroupBox("Export")
-        export_layout = QVBoxLayout(export_group)
-        export_button = QPushButton("Export Stereocard PNG")
-        export_button.clicked.connect(self.export_card)
-        export_layout.addWidget(export_button)
-        layout.addWidget(export_group)
-
         layout.addStretch(1)
         return panel
 
@@ -309,8 +333,7 @@ class StereoDandifierWindow(QMainWindow):
         return label, slider
 
     def _apply_app_style(self):
-        self.setStyleSheet(
-            """
+        self.setStyleSheet("""
             QMainWindow {
                 background: #f4f1ea;
             }
@@ -383,8 +406,14 @@ class StereoDandifierWindow(QMainWindow):
                 color: #17382f;
                 font-weight: 700;
             }
-            """
-        )
+            QLabel#paperLabel {
+                padding: 4px 10px;
+                border-radius: 12px;
+                background: #edf2f8;
+                color: #314960;
+                font-weight: 700;
+            }
+            """)
 
     def dragEnterEvent(self, event: QDragEnterEvent):
         if event.mimeData().hasUrls():
@@ -533,6 +562,21 @@ class StereoDandifierWindow(QMainWindow):
         self.layout_info.setText(particulars)
         self.layout_template.setToolTip(particulars)
 
+    def _paper_choice_changed(self, name: str):
+        if self._updating_controls:
+            return
+        self.page_layout = page_layout_for_name(name)
+        self._update_paper_controls()
+        self._refresh_previews(reset_view=True)
+
+    def _update_paper_controls(self):
+        width_mm, height_mm = self.page_layout.size_mm
+        self.paper_label.setText(f"Paper: {self.page_layout.name}")
+        self.paper_label.setToolTip(self.page_layout.source)
+        self.paper_size_label.setText(f"{width_mm:g} x {height_mm:g} mm")
+        self.paper_dpi_label.setText(f"{self.page_layout.dpi} dpi")
+        self.paper_source_label.setText(self.page_layout.source)
+
     def _controls_changed(self, *_args):
         if self._updating_controls:
             return
@@ -564,9 +608,12 @@ class StereoDandifierWindow(QMainWindow):
         styled_left = apply_style(pair[0], current.settings)
         styled_right = apply_style(pair[1], current.settings)
 
-        card = render_card(styled_left, styled_right, current.settings)
+        card = render_card(
+            styled_left, styled_right, current.settings, dpi=self.page_layout.dpi
+        )
+        preview = render_print_preview(card, self.page_layout, dpi=self.page_layout.dpi)
 
-        self.card_view.set_image(card, reset_view=reset_view)
+        self.card_view.set_image(preview, reset_view=reset_view)
         self._set_comfort(score_comfort(source, current.settings))
 
     def _set_comfort(self, text: str):
@@ -581,21 +628,30 @@ class StereoDandifierWindow(QMainWindow):
         default_stem = current.path.with_suffix("").name
         if current.frame_count > 1:
             default_stem = f"{default_stem}-frame-{current.frame_index + 1}"
-        default_name = default_stem + "-stereocard.png"
+        default_name = default_stem + "-stereocard.pdf"
         file_path, _ = QFileDialog.getSaveFileName(
             self,
-            "Export Stereocard",
+            "Export PDF",
             str(current.path.with_name(default_name)),
-            "PNG image (*.png)",
+            "PDF document (*.pdf)",
         )
         if not file_path:
             return
+        if not file_path.lower().endswith(".pdf"):
+            file_path += ".pdf"
 
+        export_dpi = export_dpi_for_source(
+            current.source, current.settings, minimum_dpi=self.page_layout.dpi
+        )
         left, right = split_stereo_pair(current.source, current.settings)
         card = render_card(
             apply_style(left, current.settings),
             apply_style(right, current.settings),
             current.settings,
+            dpi=export_dpi,
         )
-        card.save(file_path)
-        self.statusBar().showMessage(f"Exported: {Path(file_path).name}")
+        page = render_print_preview(card, self.page_layout, dpi=export_dpi)
+        save_pdf(page, file_path, dpi=export_dpi)
+        self.statusBar().showMessage(
+            f"Exported: {Path(file_path).name} at {export_dpi} dpi"
+        )

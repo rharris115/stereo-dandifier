@@ -55,12 +55,12 @@ CARD_FORMATS = {
 }
 
 
-def mm_to_px(mm: float) -> int:
-    return round((mm / MM_PER_INCH) * EXPORT_DPI)
+def mm_to_px(mm: float, dpi: int = EXPORT_DPI) -> int:
+    return round((mm / MM_PER_INCH) * dpi)
 
 
-def mm_pair_to_px(value: tuple[float, float]) -> tuple[int, int]:
-    return mm_to_px(value[0]), mm_to_px(value[1])
+def mm_pair_to_px(value: tuple[float, float], dpi: int = EXPORT_DPI) -> tuple[int, int]:
+    return mm_to_px(value[0], dpi=dpi), mm_to_px(value[1], dpi=dpi)
 
 
 def format_particulars(name: str) -> str:
