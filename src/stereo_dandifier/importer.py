@@ -62,6 +62,7 @@ def load_raw_project_images(path: Path) -> list[ProjectImage]:
                     frame_index=0,
                     frame_count=2,
                     variant_name="Preview",
+                    selected_for_export=False,
                     exif=exif,
                     settings=RenderSettings(caption=caption),
                 )
@@ -75,6 +76,7 @@ def load_raw_project_images(path: Path) -> list[ProjectImage]:
                 frame_index=len(variants),
                 frame_count=len(variants) + 1,
                 variant_name="RAW render",
+                selected_for_export=True,
                 exif=exif,
                 settings=RenderSettings(caption=caption),
             )

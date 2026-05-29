@@ -1,7 +1,7 @@
 from PIL import Image, ImageDraw, ImageEnhance
 
 from stereo_dandifier.formats import EXPORT_DPI, CARD_FORMATS, mm_pair_to_px, mm_to_px
-from stereo_dandifier.models import RenderSettings
+from stereo_dandifier.models import ProjectImage, RenderSettings
 from stereo_dandifier.print_layout import PageLayout
 
 
@@ -116,19 +116,96 @@ def export_dpi_for_source(
 def render_print_preview(
     card: Image.Image, page_layout: PageLayout, dpi: int = EXPORT_DPI
 ) -> Image.Image:
+    return render_print_page([card], page_layout, dpi=dpi)
+
+
+def render_print_pages(
+    cards: list[Image.Image], page_layout: PageLayout, dpi: int = EXPORT_DPI
+) -> list[Image.Image]:
+    if not cards:
+        return [blank_print_page(page_layout, dpi=dpi)]
+
+    per_page = cards_per_page(cards[0].size, page_layout, dpi=dpi)
+    return [
+        render_print_page(cards[index : index + per_page], page_layout, dpi=dpi)
+        for index in range(0, len(cards), per_page)
+    ]
+
+
+def render_print_page(
+    cards: list[Image.Image], page_layout: PageLayout, dpi: int = EXPORT_DPI
+) -> Image.Image:
     page_w, page_h = mm_pair_to_px(page_layout.size_mm, dpi=dpi)
     page = Image.new("RGB", (page_w, page_h), (255, 255, 255))
+    if not cards:
+        return page
 
-    x = (page_w - card.width) // 2
-    y = (page_h - card.height) // 2
-    page.paste(card, (x, y))
+    card_w, card_h = cards[0].size
+    columns, rows = card_grid(card_w, card_h, page_layout, dpi=dpi)
+    count = min(len(cards), columns * rows)
+    grid_w = columns * card_w
+    grid_h = rows * card_h
+    start_x = (page_w - grid_w) // 2
+    start_y = (page_h - grid_h) // 2
 
-    draw_guillotine_guides(page, (x, y, x + card.width, y + card.height))
+    for index, card in enumerate(cards[:count]):
+        column = index % columns
+        row = index // columns
+        x = start_x + column * card_w
+        y = start_y + row * card_h
+        page.paste(card, (x, y))
+        draw_guillotine_guides(page, (x, y, x + card.width, y + card.height))
+
     return page
 
 
+def blank_print_page(page_layout: PageLayout, dpi: int = EXPORT_DPI) -> Image.Image:
+    page_w, page_h = mm_pair_to_px(page_layout.size_mm, dpi=dpi)
+    return Image.new("RGB", (page_w, page_h), (255, 255, 255))
+
+
+def cards_per_page(
+    card_size: tuple[int, int], page_layout: PageLayout, dpi: int = EXPORT_DPI
+) -> int:
+    columns, rows = card_grid(card_size[0], card_size[1], page_layout, dpi=dpi)
+    return columns * rows
+
+
+def card_grid(
+    card_w: int, card_h: int, page_layout: PageLayout, dpi: int = EXPORT_DPI
+) -> tuple[int, int]:
+    page_w, page_h = mm_pair_to_px(page_layout.size_mm, dpi=dpi)
+    columns = max(1, page_w // card_w)
+    rows = max(1, page_h // card_h)
+    return columns, rows
+
+
 def save_pdf(page: Image.Image, file_path: str, dpi: int):
-    page.convert("RGB").save(file_path, "PDF", resolution=dpi)
+    save_pdf_pages([page], file_path, dpi=dpi)
+
+
+def save_pdf_pages(pages: list[Image.Image], file_path: str, dpi: int):
+    if not pages:
+        raise ValueError("Cannot save a PDF without at least one page")
+
+    first, *rest = [page.convert("RGB") for page in pages]
+    first.save(
+        file_path,
+        "PDF",
+        resolution=dpi,
+        save_all=bool(rest),
+        append_images=rest,
+    )
+
+
+def render_project_card(project_image: ProjectImage, dpi: int) -> Image.Image:
+    left, right = split_stereo_pair(project_image.source, project_image.settings)
+    return render_card(
+        apply_style(left, project_image.settings),
+        apply_style(right, project_image.settings),
+        project_image.settings,
+        dpi=dpi,
+    )
 
 
 def draw_guillotine_guides(page: Image.Image, bounds: tuple[int, int, int, int]):

@@ -5,7 +5,9 @@ from stereo_dandifier.formats import CARD_FORMATS, mm_pair_to_px
 from stereo_dandifier.image_ops import (
     apply_style,
     export_dpi_for_source,
+    card_grid,
     native_card_image_dpi,
+    render_print_pages,
     render_card,
     render_print_preview,
     save_pdf,
@@ -109,8 +111,9 @@ def test_print_preview_places_card_on_paper_with_blue_cut_guides():
     preview = render_print_preview(card, page_layout)
 
     assert preview.size == mm_pair_to_px(page_layout.size_mm)
-    left = (preview.width - card.width) // 2
-    top = (preview.height - card.height) // 2
+    columns, rows = card_grid(card.width, card.height, page_layout)
+    left = (preview.width - columns * card.width) // 2
+    top = (preview.height - rows * card.height) // 2
     right = left + card.width
     bottom = top + card.height
     guide_colour = (170, 210, 246)
@@ -119,6 +122,19 @@ def test_print_preview_places_card_on_paper_with_blue_cut_guides():
     assert preview.getpixel((0, top)) == guide_colour
     assert preview.getpixel((0, bottom)) == guide_colour
     assert preview.getpixel((left + 10, top + 10)) == (255, 255, 255)
+
+
+def test_print_pages_maximise_cards_per_page():
+    page_layout = page_layout_for_name("A4")
+    card = Image.new(
+        "RGB",
+        mm_pair_to_px(CARD_FORMATS["Holmes (standard)"]["card_mm"]),
+        (255, 255, 255),
+    )
+
+    pages = render_print_pages([card, card, card, card], page_layout)
+
+    assert len(pages) == 2
 
 
 def test_save_pdf_writes_pdf_file(tmp_path):

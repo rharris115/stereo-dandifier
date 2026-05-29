@@ -57,8 +57,11 @@ def test_dng_import_uses_raw_preview_and_raw_render_when_rawpy_is_available(
     images = load_raw_project_images(path)
 
     assert [image.variant_name for image in images] == ["Preview", "RAW render"]
+    assert [image.selected_for_export for image in images] == [False, True]
     assert images[0].display_name == "image.dng [Preview]"
     assert images[1].display_name == "image.dng [RAW render]"
+    assert images[0].thumbnail_name == "Preview"
+    assert images[1].thumbnail_name == "RAW render"
     red, green, blue = images[0].source.getpixel((0, 0))
     assert red > 240
     assert green < 10

@@ -24,6 +24,7 @@ class ProjectImage:
     frame_index: int = 0
     frame_count: int = 1
     variant_name: str | None = None
+    selected_for_export: bool = True
     exif: dict[str, str] = field(default_factory=dict)
     settings: RenderSettings = field(default_factory=RenderSettings)
 
@@ -34,3 +35,11 @@ class ProjectImage:
         if self.frame_count <= 1:
             return self.path.name
         return f"{self.path.name} [{self.frame_index + 1}/{self.frame_count}]"
+
+    @property
+    def thumbnail_name(self) -> str:
+        if self.variant_name:
+            return self.variant_name
+        if self.frame_count > 1:
+            return f"Image {self.frame_index + 1}"
+        return "Card"
