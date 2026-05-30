@@ -14,6 +14,8 @@ from stereo_dandifier.image_ops import (
     caption_positions,
     caption_windows,
     centered_caption_y,
+    crop_axis_origin,
+    crop_to_window,
     export_dpi_for_source,
     card_grid,
     native_card_image_dpi,
@@ -25,12 +27,15 @@ from stereo_dandifier.image_ops import (
     save_pdf_pages,
     source_metadata_dpi,
     split_stereo_pair,
+    source_crop_box,
     stereo_window_x_positions,
     trim_transparent,
     trim_vertical_transparent,
     visible_image_bottom,
+    window_bounds_for_project,
+    window_mask,
 )
-from stereo_dandifier.models import RenderSettings, plain_caption_html
+from stereo_dandifier.models import ProjectImage, RenderSettings, plain_caption_html
 from stereo_dandifier.print_layout import page_layout_for_name
 
 
@@ -229,11 +234,7 @@ def test_caption_is_centered_between_visible_image_bottom_and_card_bottom():
     right = Image.new("RGB", (800, 300), (120, 130, 140))
 
     card = render_card(left, right, settings, dpi=300)
-    visible_bottom = visible_image_bottom(
-        image_y=95,
-        image_h=827,
-        fitted_h=310,
-    )
+    visible_bottom = 95 + 827
     caption_bbox = non_white_bbox(card, (165, visible_bottom, 992, card.height))
 
     assert app is not None
@@ -241,6 +242,85 @@ def test_caption_is_centered_between_visible_image_bottom_and_card_bottom():
     above = caption_bbox[1] - visible_bottom
     below = card.height - caption_bbox[3]
     assert abs(above - below) <= 8
+
+
+def test_oval_window_masks_window_corners():
+    settings = RenderSettings(window_shape="Oval")
+    source = Image.new("RGB", (800, 300), (255, 0, 0))
+
+    card = render_card(source, source, settings, dpi=300)
+    left_x, _right_x = stereo_window_x_positions(
+        card_w=2126,
+        image_w=827,
+        spacing=898,
+    )
+
+    assert card.getpixel((left_x, 95)) == (255, 255, 255)
+    assert card.getpixel((left_x + 413, 95 + 413)) == (255, 0, 0)
+
+
+def test_window_crop_offset_selects_different_source_area():
+    source = Image.new("RGB", (4, 4))
+    source.paste((255, 0, 0), (0, 0, 2, 4))
+    source.paste((0, 0, 255), (2, 0, 4, 4))
+
+    left_crop = crop_to_window(
+        source, 2, 2, RenderSettings(image_area_percent=50, crop_x_percent=-100)
+    )
+    right_crop = crop_to_window(
+        source, 2, 2, RenderSettings(image_area_percent=50, crop_x_percent=100)
+    )
+
+    assert left_crop.getpixel((0, 0)) == (255, 0, 0)
+    assert right_crop.getpixel((0, 0)) == (0, 0, 255)
+
+
+def test_image_area_percent_selects_vertical_source_distance():
+    settings = RenderSettings(image_area_percent=50)
+
+    assert source_crop_box((100, 200), (50, 100), settings) == (25, 50, 75, 150)
+
+
+def test_vertical_movement_shifts_visible_source_area():
+    top = source_crop_box(
+        (100, 200),
+        (50, 100),
+        RenderSettings(image_area_percent=50, crop_y_percent=-100),
+    )
+    bottom = source_crop_box(
+        (100, 200),
+        (50, 100),
+        RenderSettings(image_area_percent=50, crop_y_percent=100),
+    )
+
+    assert top == (25, 0, 75, 100)
+    assert bottom == (25, 100, 75, 200)
+
+
+def test_crop_axis_origin_maps_percent_to_available_offset():
+    assert crop_axis_origin(100, -100) == 0
+    assert crop_axis_origin(100, 0) == 50
+    assert crop_axis_origin(100, 100) == 100
+
+
+def test_window_mask_supports_classic_arched_top():
+    mask = window_mask(20, 30, "Arched top")
+
+    assert mask.getpixel((0, 0)) == 0
+    assert mask.getpixel((10, 0)) == 255
+    assert mask.getpixel((0, 29)) == 255
+
+
+def test_window_bounds_for_project_matches_rendered_window_pair(tmp_path):
+    project_image = ProjectImage(
+        path=tmp_path / "card.png",
+        source=Image.new("RGB", (800, 300), (255, 0, 0)),
+        settings=RenderSettings(),
+    )
+
+    bounds = window_bounds_for_project(project_image, dpi=300)
+
+    assert bounds == [(200, 94, 827, 827), (1098, 94, 827, 827)]
 
 
 def test_black_and_white_mode_removes_colour():

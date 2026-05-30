@@ -3,18 +3,22 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PIL import Image
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QRectF, Qt
 from PySide6.QtGui import QFont, QTextDocument
 from PySide6.QtWidgets import QApplication
 
 from stereo_dandifier.ui import (
+    CaptionDialog,
     ExportDialog,
+    SourceWindowView,
     StereoDandifierWindow,
+    WindowDialog,
     ZoomableImageView,
     editor_dpi_for_image,
     export_dpi_for_images,
     export_page_layouts,
     left_thumbnail_image,
+    window_shape_path,
 )
 from stereo_dandifier.models import ProjectImage, RenderSettings
 from stereo_dandifier.print_layout import default_page_layout, page_layout_for_name
@@ -129,34 +133,28 @@ def test_export_dpi_for_images_uses_selected_originals(tmp_path):
 
 def test_caption_placement_updates_current_card_settings(tmp_path):
     app = QApplication.instance() or QApplication([])
-    path = tmp_path / "card.png"
-    Image.new("RGB", (8, 4), (255, 0, 0)).save(path)
-    window = StereoDandifierWindow()
+    dialog = CaptionDialog(RenderSettings(caption_position="Left image"))
 
-    window._import_paths([path])
-    window.caption_position.setCurrentText("Right image")
+    dialog.position_choice.setCurrentText("Right image")
 
     assert app is not None
-    assert window.current_image.settings.caption_position == "Right image"
+    assert dialog.caption_position == "Right image"
 
 
 def test_caption_typography_updates_current_card_settings(tmp_path):
     app = QApplication.instance() or QApplication([])
-    path = tmp_path / "card.png"
-    Image.new("RGB", (8, 4), (255, 0, 0)).save(path)
-    window = StereoDandifierWindow()
+    dialog = CaptionDialog(RenderSettings())
 
-    window._import_paths([path])
-    window.caption.setPlainText("First wicket")
-    window.caption.selectAll()
-    window.caption_font_family.setCurrentFont(QFont("Georgia"))
-    window.caption_font_size.setValue(18)
-    window.caption_bold.setChecked(True)
-    window.caption_italic.setChecked(True)
-    window.caption_align_right.click()
+    dialog.editor.setPlainText("First wicket")
+    dialog.editor.selectAll()
+    dialog.font_family.setCurrentFont(QFont("Georgia"))
+    dialog.font_size.setValue(18)
+    dialog.bold.setChecked(True)
+    dialog.italic.setChecked(True)
+    dialog.align_right.click()
 
     assert app is not None
-    caption_html = window.current_image.settings.caption_html
+    caption_html = dialog.caption_html
     assert "Georgia" in caption_html
     assert "18pt" in caption_html
     assert "font-weight" in caption_html
@@ -166,20 +164,17 @@ def test_caption_typography_updates_current_card_settings(tmp_path):
 
 def test_caption_editor_can_style_substrings_with_qt_document(tmp_path):
     app = QApplication.instance() or QApplication([])
-    path = tmp_path / "card.png"
-    Image.new("RGB", (8, 4), (255, 0, 0)).save(path)
-    window = StereoDandifierWindow()
+    dialog = CaptionDialog(RenderSettings())
 
-    window._import_paths([path])
-    window.caption.setPlainText("First wicket")
-    cursor = window.caption.textCursor()
+    dialog.editor.setPlainText("First wicket")
+    cursor = dialog.editor.textCursor()
     cursor.setPosition(0)
     cursor.setPosition(5, cursor.MoveMode.KeepAnchor)
-    window.caption.setTextCursor(cursor)
-    window.caption_bold.setChecked(True)
+    dialog.editor.setTextCursor(cursor)
+    dialog.bold.setChecked(True)
 
     assert app is not None
-    fragments = text_fragments(window.current_image.settings.caption_html)
+    fragments = text_fragments(dialog.caption_html)
     assert [text for text, _format in fragments] == ["First", " wicket"]
     assert fragments[0][1].font().bold()
     assert not fragments[1][1].font().bold()
@@ -187,18 +182,124 @@ def test_caption_editor_can_style_substrings_with_qt_document(tmp_path):
 
 def test_caption_alignment_uses_icon_buttons(tmp_path):
     app = QApplication.instance() or QApplication([])
+    dialog = CaptionDialog(RenderSettings())
+
+    dialog.editor.setPlainText("First wicket")
+    dialog.align_left.click()
+
+    assert app is not None
+    assert dialog.align_left.isChecked()
+    assert not dialog.align_center.isChecked()
+    assert "First wicket" in dialog.caption_html
+
+
+def test_properties_pane_does_not_include_caption_editor(tmp_path):
+    app = QApplication.instance() or QApplication([])
+    window = StereoDandifierWindow()
+
+    assert app is not None
+    assert not hasattr(window, "caption")
+    assert not hasattr(window, "caption_position")
+    assert not hasattr(window, "window_editor")
+
+
+def test_card_preview_gets_caption_hotspot(tmp_path):
+    app = QApplication.instance() or QApplication([])
     path = tmp_path / "card.png"
     Image.new("RGB", (8, 4), (255, 0, 0)).save(path)
     window = StereoDandifierWindow()
 
     window._import_paths([path])
-    window.caption.setPlainText("First wicket")
-    window.caption_align_left.click()
 
     assert app is not None
-    assert window.caption_align_left.isChecked()
-    assert not window.caption_align_center.isChecked()
-    assert "First wicket" in window.current_image.settings.caption_html
+    assert window.card_view._hotspots
+
+
+def test_card_preview_has_separate_window_and_caption_hotspots(tmp_path):
+    app = QApplication.instance() or QApplication([])
+    path = tmp_path / "card.png"
+    Image.new("RGB", (8, 4), (255, 0, 0)).save(path)
+    window = StereoDandifierWindow()
+
+    window._import_paths([path])
+
+    callbacks = [callback for _bounds, callback in window.card_view._hotspots]
+    assert app is not None
+    assert callbacks.count(window.edit_window) == 2
+    assert callbacks.count(window.edit_caption) == 2
+
+
+def test_window_dialog_exposes_shape_size_and_crop_controls():
+    app = QApplication.instance() or QApplication([])
+    dialog = WindowDialog(
+        RenderSettings(
+            layout_template="Realist print",
+            window_shape="Oval",
+            image_area_percent=75,
+            crop_x_percent=-20,
+            crop_y_percent=35,
+        ),
+        preview_image=Image.new("RGB", (100, 80), (120, 130, 140)),
+    )
+
+    dialog.shape_choice.setCurrentText("Arched top")
+    dialog.image_area.setValue(50)
+    dialog.crop_x.setValue(15)
+    dialog.crop_y.setValue(-10)
+
+    assert app is not None
+    assert dialog.window_shape == "Arched top"
+    assert dialog.image_area_percent == 50
+    assert dialog.crop_x_percent == 15
+    assert dialog.crop_y_percent == -10
+    assert dialog.preview is not None
+
+
+def test_window_dialog_updates_position_from_drag_preview():
+    app = QApplication.instance() or QApplication([])
+    dialog = WindowDialog(
+        RenderSettings(image_area_percent=50),
+        preview_image=Image.new("RGB", (100, 100), (120, 130, 140)),
+    )
+
+    dialog._crop_changed_from_view(100, -100)
+
+    assert app is not None
+    assert dialog.crop_x_percent == 100
+    assert dialog.crop_y_percent == -100
+    assert dialog.preview._crop_box() == (50, 0, 100, 50)
+
+
+def test_source_window_view_greys_area_outside_window():
+    app = QApplication.instance() or QApplication([])
+    view = SourceWindowView(
+        Image.new("RGB", (100, 100), (120, 130, 140)),
+        RenderSettings(image_area_percent=50),
+    )
+
+    assert app is not None
+    assert view._window_item.path().boundingRect() == QRectF(25, 25, 50, 50)
+    assert view._shade_item.path().contains(QRectF(0, 0, 10, 10).center())
+
+
+def test_source_window_view_reflects_selected_window_shape():
+    app = QApplication.instance() or QApplication([])
+    view = SourceWindowView(
+        Image.new("RGB", (100, 100), (120, 130, 140)),
+        RenderSettings(image_area_percent=50, window_shape="Oval"),
+    )
+
+    assert app is not None
+    assert not view._window_path().contains(QRectF(25, 25, 1, 1).center())
+    assert view._window_path().contains(QRectF(50, 50, 1, 1).center())
+
+
+def test_window_shape_path_supports_arched_top():
+    path = window_shape_path(QRectF(10, 10, 40, 60), "Arched top")
+
+    assert not path.contains(QRectF(10, 10, 1, 1).center())
+    assert path.contains(QRectF(30, 10, 1, 1).center())
+    assert path.contains(QRectF(10, 69, 1, 1).center())
 
 
 def text_fragments(caption_html: str):

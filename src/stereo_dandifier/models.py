@@ -27,6 +27,10 @@ class RenderSettings:
     tone_mode: str = "Colour"
     caption_html: str = ""
     caption_position: str = "Both images"
+    window_shape: str = "Rectangle"
+    image_area_percent: int = 100
+    crop_x_percent: int = 0
+    crop_y_percent: int = 0
     swap_eyes: bool = True
     brightness: int = 0
     contrast: int = 0

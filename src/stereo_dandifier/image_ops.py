@@ -75,20 +75,19 @@ def render_card(
     card_w, card_h = mm_pair_to_px(spec["card_mm"], dpi=dpi)
     image_w, image_h = mm_pair_to_px(spec["image_mm"], dpi=dpi)
     top_margin = mm_to_px(spec["top_margin_mm"], dpi=dpi)
-    bottom_area = mm_to_px(spec["bottom_mm"], dpi=dpi)
     if spec["gap_mm"] is None:
         spacing = mm_to_px(spec["center_spacing_mm"], dpi=dpi)
     else:
-        spacing = image_w + mm_to_px(spec["gap_mm"], dpi=dpi)
+        spacing = mm_to_px(spec["center_spacing_mm"], dpi=dpi)
 
     card = Image.new("RGB", (card_w, card_h), (255, 255, 255))
-    left_fit = fit_to_box(left, image_w, image_h)
-    right_fit = fit_to_box(right, image_w, image_h)
+    left_fit = crop_to_window(left, image_w, image_h, settings)
+    right_fit = crop_to_window(right, image_w, image_h, settings)
 
     left_x, right_x = stereo_window_x_positions(card_w, image_w, spacing)
     image_y = top_margin
-    paste_window(card, left_fit, left_x, image_y, image_w, image_h)
-    paste_window(card, right_fit, right_x, image_y, image_w, image_h)
+    paste_window(card, left_fit, left_x, image_y, settings.window_shape)
+    paste_window(card, right_fit, right_x, image_y, settings.window_shape)
 
     if caption_html_text(settings.caption_html):
         for window_x, visible_bottom in caption_windows(
@@ -113,6 +112,18 @@ def render_card(
             card.paste(caption_content, (window_x, caption_y), caption_content)
 
     return card
+
+
+def card_window_geometry(
+    settings: RenderSettings, dpi: int
+) -> tuple[int, int, int, int, int, int]:
+    spec = CARD_FORMATS[settings.layout_template]
+    card_w, _card_h = mm_pair_to_px(spec["card_mm"], dpi=dpi)
+    image_w, image_h = mm_pair_to_px(spec["image_mm"], dpi=dpi)
+    top_margin = mm_to_px(spec["top_margin_mm"], dpi=dpi)
+    spacing = mm_to_px(spec["center_spacing_mm"], dpi=dpi)
+    left_x, right_x = stereo_window_x_positions(card_w, image_w, spacing)
+    return left_x, right_x, top_margin, image_w, image_h, spacing
 
 
 def caption_positions(
@@ -153,6 +164,41 @@ def caption_windows(
 
 def visible_image_bottom(image_y: int, image_h: int, fitted_h: int) -> int:
     return image_y + ((image_h + fitted_h) // 2)
+
+
+def crop_to_window(
+    image: Image.Image, box_w: int, box_h: int, settings: RenderSettings
+) -> Image.Image:
+    source = image.convert("RGB")
+    crop_box = source_crop_box(source.size, (box_w, box_h), settings)
+    crop = source.crop(crop_box)
+    return crop.resize((box_w, box_h), Image.Resampling.LANCZOS)
+
+
+def source_crop_box(
+    source_size: tuple[int, int],
+    window_size: tuple[int, int],
+    settings: RenderSettings,
+) -> tuple[int, int, int, int]:
+    source_w, source_h = source_size
+    window_w, window_h = window_size
+    area_percent = max(1, min(100, settings.image_area_percent))
+    crop_h = max(1, round(source_h * area_percent / 100))
+    crop_w = max(1, round(crop_h * window_w / window_h))
+    if crop_w > source_w:
+        crop_w = source_w
+        crop_h = max(1, round(crop_w * window_h / window_w))
+
+    left = crop_axis_origin(source_w - crop_w, settings.crop_x_percent)
+    top = crop_axis_origin(source_h - crop_h, settings.crop_y_percent)
+    return left, top, left + crop_w, top + crop_h
+
+
+def crop_axis_origin(max_offset: int, percent: int) -> int:
+    if max_offset <= 0:
+        return 0
+    normalised = max(-100, min(100, percent))
+    return round((normalised + 100) / 200 * max_offset)
 
 
 def caption_html_text(caption_html: str) -> str:
@@ -359,6 +405,47 @@ def render_project_card(project_image: ProjectImage, dpi: int) -> Image.Image:
     )
 
 
+def caption_bounds_for_project(
+    project_image: ProjectImage, dpi: int
+) -> list[tuple[int, int, int, int]]:
+    settings = project_image.settings
+    spec = CARD_FORMATS[settings.layout_template]
+    _card_w, card_h = mm_pair_to_px(spec["card_mm"], dpi=dpi)
+    left_x, right_x, top_margin, image_w, image_h, _spacing = card_window_geometry(
+        settings, dpi
+    )
+
+    left, right = split_stereo_pair(project_image.source, settings)
+    left_fit = crop_to_window(left, image_w, image_h, settings)
+    right_fit = crop_to_window(right, image_w, image_h, settings)
+
+    return [
+        (window_x, visible_bottom, image_w, card_h - visible_bottom)
+        for window_x, visible_bottom in caption_windows(
+            settings.caption_position,
+            left_x,
+            right_x,
+            left_fit,
+            right_fit,
+            top_margin,
+            image_h,
+        )
+    ]
+
+
+def window_bounds_for_project(
+    project_image: ProjectImage, dpi: int
+) -> list[tuple[int, int, int, int]]:
+    settings = project_image.settings
+    left_x, right_x, top_margin, image_w, image_h, _spacing = card_window_geometry(
+        settings, dpi
+    )
+    return [
+        (left_x, top_margin, image_w, image_h),
+        (right_x, top_margin, image_w, image_h),
+    ]
+
+
 def draw_guillotine_guides(page: Image.Image, bounds: tuple[int, int, int, int]):
     draw = ImageDraw.Draw(page)
     left, top, right, bottom = bounds
@@ -382,17 +469,67 @@ def paste_window(
     image: Image.Image,
     x: int,
     y: int,
-    box_w: int,
-    box_h: int,
+    shape: str = "Rectangle",
     show_boundary: bool = False,
 ):
-    image_x = x + (box_w - image.width) // 2
-    image_y = y + (box_h - image.height) // 2
-    card.paste(image, (image_x, image_y))
+    mask = window_mask(image.width, image.height, shape)
+    card.paste(image, (x, y), mask)
 
     if show_boundary:
         draw = ImageDraw.Draw(card)
-        draw.rectangle((x, y, x + box_w, y + box_h), outline=(220, 220, 220), width=1)
+        draw_window_boundary(draw, x, y, image.width, image.height, shape)
+
+
+def window_mask(width: int, height: int, shape: str) -> Image.Image:
+    mask = Image.new("L", (width, height), 0)
+    draw = ImageDraw.Draw(mask)
+    if shape == "Oval":
+        draw.ellipse((0, 0, width - 1, height - 1), fill=255)
+    elif shape == "Circle":
+        diameter = min(width, height)
+        left = (width - diameter) // 2
+        top = (height - diameter) // 2
+        draw.ellipse((left, top, left + diameter - 1, top + diameter - 1), fill=255)
+    elif shape == "Arched top":
+        draw_arched_top(draw, width, height, fill=255)
+    else:
+        draw.rectangle((0, 0, width - 1, height - 1), fill=255)
+    return mask
+
+
+def draw_arched_top(draw: ImageDraw.ImageDraw, width: int, height: int, fill):
+    radius = width / 2
+    arch_height = min(height, round(radius))
+    draw.rectangle((0, arch_height, width - 1, height - 1), fill=fill)
+    draw.pieslice((0, 0, width - 1, arch_height * 2 - 1), 180, 360, fill=fill)
+
+
+def draw_window_boundary(
+    draw: ImageDraw.ImageDraw, x: int, y: int, width: int, height: int, shape: str
+):
+    outline = (220, 220, 220)
+    if shape == "Oval":
+        draw.ellipse((x, y, x + width, y + height), outline=outline, width=1)
+    elif shape == "Circle":
+        diameter = min(width, height)
+        left = x + (width - diameter) // 2
+        top = y + (height - diameter) // 2
+        draw.ellipse((left, top, left + diameter, top + diameter), outline=outline)
+    elif shape == "Arched top":
+        radius = width / 2
+        arch_height = min(height, round(radius))
+        draw.line((x, y + arch_height, x, y + height), fill=outline)
+        draw.line((x + width, y + arch_height, x + width, y + height), fill=outline)
+        draw.line((x, y + height, x + width, y + height), fill=outline)
+        draw.arc(
+            (x, y, x + width, y + arch_height * 2),
+            180,
+            360,
+            fill=outline,
+            width=1,
+        )
+    else:
+        draw.rectangle((x, y, x + width, y + height), outline=outline, width=1)
 
 
 def score_comfort(image: Image.Image, settings: RenderSettings) -> str:

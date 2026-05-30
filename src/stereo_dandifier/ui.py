@@ -1,16 +1,22 @@
+from dataclasses import replace
 from pathlib import Path
+from typing import Callable
 
 from PIL import Image
 from PIL.ImageQt import ImageQt
 
-from PySide6.QtCore import QSize, Qt
+from PySide6.QtCore import QRectF, QSize, Qt
 from PySide6.QtGui import (
     QAction,
+    QBrush,
+    QColor,
     QDragEnterEvent,
     QDropEvent,
     QFont,
     QIcon,
     QPainter,
+    QPainterPath,
+    QPen,
     QPixmap,
     QTextCharFormat,
 )
@@ -21,7 +27,9 @@ from PySide6.QtWidgets import (
     QDialogButtonBox,
     QFileDialog,
     QFormLayout,
+    QGraphicsPathItem,
     QGraphicsPixmapItem,
+    QGraphicsRectItem,
     QGraphicsScene,
     QGraphicsTextItem,
     QGraphicsView,
@@ -47,11 +55,15 @@ from PySide6.QtWidgets import (
 
 from stereo_dandifier.formats import CARD_FORMATS, format_particulars
 from stereo_dandifier.image_ops import (
+    caption_bounds_for_project,
     export_dpi_for_source,
     render_print_pages,
     render_project_card,
     save_pdf_pages,
     score_comfort,
+    source_crop_box,
+    split_stereo_pair,
+    window_bounds_for_project,
 )
 from stereo_dandifier.importer import load_project_images
 from stereo_dandifier.models import (
@@ -82,11 +94,17 @@ class ZoomableImageView(QGraphicsView):
         )
         self._placeholder = QGraphicsTextItem(placeholder)
         self._placeholder.setDefaultTextColor(Qt.GlobalColor.darkGray)
+        self._hotspot_item = QGraphicsRectItem()
+        self._hotspot_item.setBrush(QBrush(QColor(185, 220, 255, 75)))
+        self._hotspot_item.setPen(QPen(QColor(120, 175, 230, 120)))
+        self._hotspot_item.setVisible(False)
         self._zoom = 0
         self._has_image = False
+        self._hotspots: list[tuple[QRectF, Callable[[], None]]] = []
 
         self._scene.addItem(self._placeholder)
         self._scene.addItem(self._pixmap_item)
+        self._scene.addItem(self._hotspot_item)
         self.setScene(self._scene)
 
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -100,6 +118,7 @@ class ZoomableImageView(QGraphicsView):
         self.setResizeAnchor(QGraphicsView.ViewportAnchor.AnchorViewCenter)
         self.setMinimumSize(360, 320)
         self.setToolTip("Mouse wheel zooms. Drag pans. Double-click fits the image.")
+        self.setMouseTracking(True)
 
     def set_image(self, image: Image.Image, reset_view: bool = False):
         pixmap = QPixmap.fromImage(ImageQt(image))
@@ -107,6 +126,7 @@ class ZoomableImageView(QGraphicsView):
         self._placeholder.setVisible(False)
         self._has_image = True
         self._scene.setSceneRect(self._pixmap_item.boundingRect())
+        self._hotspot_item.setVisible(False)
 
         if reset_view or self._zoom == 0:
             self.fit_to_view()
@@ -116,8 +136,22 @@ class ZoomableImageView(QGraphicsView):
         self._placeholder.setPlainText(text)
         self._placeholder.setVisible(True)
         self._has_image = False
+        self._hotspots = []
+        self._hotspot_item.setVisible(False)
         self._zoom = 0
         self.resetTransform()
+
+    def set_hotspots(self, bounds: list[tuple[int, int, int, int]], callback):
+        self.set_hotspot_actions([(bound, callback) for bound in bounds])
+
+    def set_hotspot_actions(
+        self, hotspots: list[tuple[tuple[int, int, int, int], Callable[[], None]]]
+    ):
+        self._hotspots = [
+            (QRectF(x, y, width, height), callback)
+            for (x, y, width, height), callback in hotspots
+        ]
+        self._hotspot_item.setVisible(False)
 
     def fit_to_view(self):
         if not self._has_image or self._pixmap_item.pixmap().isNull():
@@ -150,10 +184,169 @@ class ZoomableImageView(QGraphicsView):
         self.fit_to_view()
         super().mouseDoubleClickEvent(event)
 
+    def mouseMoveEvent(self, event):
+        hotspot = self._hotspot_bounds_at(event.position().toPoint())
+        if hotspot is None:
+            self._hotspot_item.setVisible(False)
+            self.viewport().unsetCursor()
+        else:
+            self._hotspot_item.setRect(hotspot)
+            self._hotspot_item.setVisible(True)
+            self.viewport().setCursor(Qt.CursorShape.PointingHandCursor)
+        super().mouseMoveEvent(event)
+
+    def leaveEvent(self, event):
+        self._hotspot_item.setVisible(False)
+        self.viewport().unsetCursor()
+        super().leaveEvent(event)
+
+    def mousePressEvent(self, event):
+        hotspot = self._hotspot_at(event.position().toPoint())
+        if event.button() == Qt.MouseButton.LeftButton and hotspot is not None:
+            _bounds, callback = hotspot
+            callback()
+            return
+        super().mousePressEvent(event)
+
+    def _hotspot_at(self, viewport_position):
+        scene_position = self.mapToScene(viewport_position)
+        for hotspot, callback in self._hotspots:
+            if hotspot.contains(scene_position):
+                return hotspot, callback
+        return None
+
+    def _hotspot_bounds_at(self, viewport_position):
+        match = self._hotspot_at(viewport_position)
+        if match is not None:
+            hotspot, _callback = match
+            return hotspot
+        return None
+
     def resizeEvent(self, event):
         super().resizeEvent(event)
         if self._zoom == 0:
             self.fit_to_view()
+
+
+class SourceWindowView(QGraphicsView):
+    def __init__(self, image: Image.Image, settings: RenderSettings):
+        super().__init__()
+        self._image = image.convert("RGB")
+        self._settings = settings
+        self._crop_changed_callback: Callable[[int, int], None] | None = None
+        self._drag_offset = None
+
+        self._scene = QGraphicsScene(self)
+        self._pixmap_item = QGraphicsPixmapItem(QPixmap.fromImage(ImageQt(self._image)))
+        self._pixmap_item.setTransformationMode(
+            Qt.TransformationMode.SmoothTransformation
+        )
+        self._shade_item = QGraphicsPathItem()
+        self._shade_item.setBrush(QBrush(QColor(80, 80, 80, 145)))
+        self._shade_item.setPen(QPen(Qt.PenStyle.NoPen))
+
+        self._window_item = QGraphicsPathItem()
+        self._window_item.setBrush(QBrush(Qt.BrushStyle.NoBrush))
+        self._window_item.setPen(QPen(QColor(120, 175, 230), 2))
+
+        self._scene.addItem(self._pixmap_item)
+        self._scene.addItem(self._shade_item)
+        self._scene.addItem(self._window_item)
+        self.setScene(self._scene)
+        self.setSceneRect(0, 0, self._image.width, self._image.height)
+        self.setRenderHints(
+            QPainter.RenderHint.Antialiasing | QPainter.RenderHint.SmoothPixmapTransform
+        )
+        self.setMinimumSize(360, 260)
+        self.setMouseTracking(True)
+        self._update_overlay()
+
+    def set_crop_changed_callback(self, callback: Callable[[int, int], None]):
+        self._crop_changed_callback = callback
+
+    def set_settings(self, settings: RenderSettings):
+        self._settings = settings
+        self._update_overlay()
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            scene_pos = self.mapToScene(event.position().toPoint())
+            window_path = self._window_path()
+            if window_path.contains(scene_pos):
+                self._drag_offset = scene_pos - self._crop_rect().topLeft()
+                self.viewport().setCursor(Qt.CursorShape.ClosedHandCursor)
+                event.accept()
+                return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        scene_pos = self.mapToScene(event.position().toPoint())
+        if self._drag_offset is not None:
+            crop_rect = self._crop_rect()
+            left = clamp(
+                round(scene_pos.x() - self._drag_offset.x()),
+                0,
+                self._image.width - round(crop_rect.width()),
+            )
+            top = clamp(
+                round(scene_pos.y() - self._drag_offset.y()),
+                0,
+                self._image.height - round(crop_rect.height()),
+            )
+            crop_x = percent_for_axis_origin(
+                self._image.width - round(crop_rect.width()), left
+            )
+            crop_y = percent_for_axis_origin(
+                self._image.height - round(crop_rect.height()), top
+            )
+            if self._crop_changed_callback is not None:
+                self._crop_changed_callback(crop_x, crop_y)
+            self._update_overlay()
+            event.accept()
+            return
+
+        if self._window_path().contains(scene_pos):
+            self.viewport().setCursor(Qt.CursorShape.OpenHandCursor)
+        else:
+            self.viewport().unsetCursor()
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if (
+            event.button() == Qt.MouseButton.LeftButton
+            and self._drag_offset is not None
+        ):
+            self._drag_offset = None
+            self.viewport().setCursor(Qt.CursorShape.OpenHandCursor)
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.fitInView(self.sceneRect(), Qt.AspectRatioMode.KeepAspectRatio)
+
+    def _crop_rect(self) -> QRectF:
+        left, top, right, bottom = self._crop_box()
+        return QRectF(left, top, right - left, bottom - top)
+
+    def _crop_box(self) -> tuple[int, int, int, int]:
+        return source_crop_box(
+            self._image.size,
+            source_window_aspect_size(self._settings),
+            self._settings,
+        )
+
+    def _window_path(self) -> QPainterPath:
+        return window_shape_path(self._crop_rect(), self._settings.window_shape)
+
+    def _update_overlay(self):
+        image_path = QPainterPath()
+        image_path.addRect(0, 0, self._image.width, self._image.height)
+        window_path = self._window_path()
+        shade_path = image_path.subtracted(window_path)
+        self._shade_item.setPath(shade_path)
+        self._window_item.setPath(window_path)
 
 
 class StereoDandifierWindow(QMainWindow):
@@ -287,65 +480,6 @@ class StereoDandifierWindow(QMainWindow):
                 Qt.ItemDataRole.ToolTipRole,
             )
         self.layout_template.currentTextChanged.connect(self._layout_template_changed)
-        self.caption = QTextEdit()
-        self.caption.setAcceptRichText(True)
-        self.caption.setPlaceholderText("Caption")
-        self.caption.setObjectName("captionEditor")
-        self.caption.setFixedHeight(104)
-        self.caption.textChanged.connect(self._controls_changed)
-        self.caption_position = QComboBox()
-        self.caption_position.addItems(["Both images", "Left image", "Right image"])
-        self.caption_position.currentTextChanged.connect(self._controls_changed)
-        self.caption_font_family = QFontComboBox()
-        self.caption_font_family.setCurrentFont(QFont(DEFAULT_CAPTION_FONT_FAMILY))
-        self.caption_font_family.currentFontChanged.connect(self._caption_font_changed)
-        self.caption_font_size = QSpinBox()
-        self.caption_font_size.setRange(6, 36)
-        self.caption_font_size.setValue(DEFAULT_CAPTION_FONT_SIZE)
-        self.caption_font_size.valueChanged.connect(self._caption_format_changed)
-        self.caption_bold = make_editor_button("B", "Bold", checked=False)
-        self.caption_bold.toggled.connect(self._caption_format_changed)
-        self.caption_italic = make_editor_button("I", "Italic", checked=False)
-        self.caption_italic.toggled.connect(self._caption_format_changed)
-        self.caption_align_left = make_editor_button(
-            "align-left", "Align left", checked=False
-        )
-        self.caption_align_center = make_editor_button(
-            "align-center", "Align center", checked=True
-        )
-        self.caption_align_right = make_editor_button(
-            "align-right", "Align right", checked=False
-        )
-        self.caption_alignment_buttons = {
-            "Left": self.caption_align_left,
-            "Center": self.caption_align_center,
-            "Right": self.caption_align_right,
-        }
-        for justification, button in self.caption_alignment_buttons.items():
-            button.clicked.connect(
-                lambda _checked=False, value=justification: (
-                    self._caption_justification_changed(value)
-                )
-            )
-        self.caption_style_bar = editor_button_bar(
-            [self.caption_bold, self.caption_italic]
-        )
-        self.caption_alignment_bar = editor_button_bar(
-            [
-                self.caption_align_left,
-                self.caption_align_center,
-                self.caption_align_right,
-            ]
-        )
-        self.caption_toolbar = caption_editor_toolbar(
-            self.caption_font_family,
-            self.caption_font_size,
-            self.caption_bold,
-            self.caption_italic,
-            self.caption_align_left,
-            self.caption_align_center,
-            self.caption_align_right,
-        )
         self.layout_info = QLabel()
         self.layout_info.setObjectName("infoBox")
         self.layout_info.setWordWrap(True)
@@ -357,9 +491,6 @@ class StereoDandifierWindow(QMainWindow):
         card_layout.addRow("Layout", self.layout_template)
         card_layout.addRow(self.layout_info)
         card_layout.addRow(self.card_info)
-        card_layout.addRow("Caption placement", self.caption_position)
-        card_layout.addRow(self.caption_toolbar)
-        card_layout.addRow("Caption", self.caption)
         layout.addWidget(self.card_group)
 
         self.style_group = QGroupBox("Style")
@@ -649,23 +780,6 @@ class StereoDandifierWindow(QMainWindow):
         self.layout_template.setCurrentText(settings.layout_template)
         self._update_layout_info(settings.layout_template)
         self.tone_mode.setCurrentText(settings.tone_mode)
-        if settings.caption_html:
-            self.caption.setHtml(settings.caption_html)
-        else:
-            self.caption.clear()
-        caption_format = self.caption.currentCharFormat()
-        self.caption_position.setCurrentText(settings.caption_position)
-        self.caption_font_family.setCurrentFont(
-            QFont(caption_font_family_from_qt_format(caption_format))
-        )
-        self.caption_font_size.setValue(
-            caption_font_size_from_qt_format(caption_format)
-        )
-        self.caption_bold.setChecked(caption_format.font().bold())
-        self.caption_italic.setChecked(caption_format.font().italic())
-        self._set_caption_alignment_button(
-            caption_justification_from_qt_alignment(self.caption.alignment())
-        )
         self.swap_eyes.setChecked(settings.swap_eyes)
         self.brightness.setValue(settings.brightness)
         self.contrast.setValue(settings.contrast)
@@ -729,37 +843,6 @@ class StereoDandifierWindow(QMainWindow):
         self.layout_info.setText(particulars)
         self.layout_template.setToolTip(particulars)
 
-    def _caption_format_changed(self, *_args):
-        if self._updating_controls:
-            return
-
-        text_format = QTextCharFormat()
-        text_format.setFontFamilies([self.caption_font_family.currentFont().family()])
-        text_format.setFontPointSize(self.caption_font_size.value())
-        text_format.setFontWeight(
-            QFont.Weight.Bold if self.caption_bold.isChecked() else QFont.Weight.Normal
-        )
-        text_format.setFontItalic(self.caption_italic.isChecked())
-        self.caption.mergeCurrentCharFormat(text_format)
-        self._controls_changed()
-
-    def _caption_font_changed(self, font: QFont):
-        if self._updating_controls:
-            return
-        self._caption_format_changed()
-
-    def _caption_justification_changed(self, justification: str):
-        if self._updating_controls:
-            return
-
-        self._set_caption_alignment_button(justification)
-        self.caption.setAlignment(qt_alignment_from_caption(justification))
-        self._controls_changed()
-
-    def _set_caption_alignment_button(self, justification: str):
-        for name, button in self.caption_alignment_buttons.items():
-            button.setChecked(name == justification)
-
     def _controls_changed(self, *_args):
         if self._updating_controls:
             return
@@ -771,8 +854,12 @@ class StereoDandifierWindow(QMainWindow):
         current.settings = RenderSettings(
             layout_template=self.layout_template.currentText(),
             tone_mode=self.tone_mode.currentText(),
-            caption_html=caption_html_from_editor(self.caption),
-            caption_position=self.caption_position.currentText(),
+            caption_html=current.settings.caption_html,
+            caption_position=current.settings.caption_position,
+            window_shape=current.settings.window_shape,
+            image_area_percent=current.settings.image_area_percent,
+            crop_x_percent=current.settings.crop_x_percent,
+            crop_y_percent=current.settings.crop_y_percent,
             swap_eyes=self.swap_eyes.isChecked(),
             brightness=self.brightness.value(),
             contrast=self.contrast.value(),
@@ -791,9 +878,57 @@ class StereoDandifierWindow(QMainWindow):
             self._set_comfort("No thumbnail selected")
             return
 
-        card = render_project_card(current, dpi=editor_dpi_for_image(current))
+        preview_dpi = editor_dpi_for_image(current)
+        card = render_project_card(current, dpi=preview_dpi)
         self.card_view.set_image(card, reset_view=reset_view)
+        self.card_view.set_hotspot_actions(
+            [
+                *[
+                    (bounds, self.edit_window)
+                    for bounds in window_bounds_for_project(current, preview_dpi)
+                ],
+                *[
+                    (bounds, self.edit_caption)
+                    for bounds in caption_bounds_for_project(current, preview_dpi)
+                ],
+            ]
+        )
         self._set_comfort(score_comfort(current.source, current.settings))
+
+    def edit_caption(self):
+        current = self.current_image
+        if current is None:
+            return
+
+        dialog = CaptionDialog(current.settings, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        current.settings = replace(
+            current.settings,
+            caption_html=dialog.caption_html,
+            caption_position=dialog.caption_position,
+        )
+        self._refresh_previews()
+
+    def edit_window(self):
+        current = self.current_image
+        if current is None:
+            return
+
+        preview_image, _right = split_stereo_pair(current.source, current.settings)
+        dialog = WindowDialog(current.settings, self, preview_image=preview_image)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        current.settings = replace(
+            current.settings,
+            window_shape=dialog.window_shape,
+            image_area_percent=dialog.image_area_percent,
+            crop_x_percent=dialog.crop_x_percent,
+            crop_y_percent=dialog.crop_y_percent,
+        )
+        self._refresh_previews()
 
     def selected_project_images(self) -> list[ProjectImage]:
         return [image for image in self.images if image.selected_for_export]
@@ -865,6 +1000,223 @@ class StereoDandifierWindow(QMainWindow):
         pages = render_print_pages(cards, page_layout, dpi=export_dpi)
         save_pdf_pages(pages, file_path, dpi=export_dpi)
         self.statusBar().showMessage(f"Exported: {Path(file_path).name}")
+
+
+class CaptionDialog(QDialog):
+    def __init__(self, settings: RenderSettings, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Edit Caption")
+        self.resize(560, 360)
+        self._updating_toolbar = False
+
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+
+        self.position_choice = QComboBox()
+        self.position_choice.addItems(["Both images", "Left image", "Right image"])
+        self.position_choice.setCurrentText(settings.caption_position)
+        form.addRow("Placement", self.position_choice)
+        layout.addLayout(form)
+
+        self.font_family = QFontComboBox()
+        self.font_size = QSpinBox()
+        self.font_size.setRange(6, 96)
+        self.font_size.setValue(DEFAULT_CAPTION_FONT_SIZE)
+        self.bold = make_editor_button("B", "Bold", False)
+        self.italic = make_editor_button("I", "Italic", False)
+        self.align_left = make_editor_button("align-left", "Align left", False)
+        self.align_center = make_editor_button("align-center", "Align center", True)
+        self.align_right = make_editor_button("align-right", "Align right", False)
+        self.alignment_buttons = {
+            "Left": self.align_left,
+            "Center": self.align_center,
+            "Right": self.align_right,
+        }
+
+        layout.addWidget(
+            caption_editor_toolbar(
+                self.font_family,
+                self.font_size,
+                self.bold,
+                self.italic,
+                self.align_left,
+                self.align_center,
+                self.align_right,
+            )
+        )
+
+        self.editor = QTextEdit()
+        self.editor.setObjectName("captionEditor")
+        self.editor.setAcceptRichText(True)
+        if settings.caption_html:
+            self.editor.setHtml(settings.caption_html)
+        else:
+            self.editor.clear()
+        layout.addWidget(self.editor, 1)
+
+        self.font_family.currentFontChanged.connect(self._caption_font_changed)
+        self.font_size.valueChanged.connect(self._caption_format_changed)
+        self.bold.toggled.connect(self._caption_format_changed)
+        self.italic.toggled.connect(self._caption_format_changed)
+        self.align_left.clicked.connect(lambda: self._set_alignment("Left"))
+        self.align_center.clicked.connect(lambda: self._set_alignment("Center"))
+        self.align_right.clicked.connect(lambda: self._set_alignment("Right"))
+        self.editor.currentCharFormatChanged.connect(self._load_text_format)
+        self.editor.cursorPositionChanged.connect(self._load_alignment)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Cancel | QDialogButtonBox.StandardButton.Ok
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+        self._load_text_format(self.editor.currentCharFormat())
+        self._load_alignment()
+        if not settings.caption_html:
+            self._caption_format_changed()
+
+    @property
+    def caption_html(self) -> str:
+        return caption_html_from_editor(self.editor)
+
+    @property
+    def caption_position(self) -> str:
+        return self.position_choice.currentText()
+
+    def _caption_format_changed(self, *_args):
+        if self._updating_toolbar:
+            return
+
+        text_format = QTextCharFormat()
+        text_format.setFontFamilies([self.font_family.currentFont().family()])
+        text_format.setFontPointSize(self.font_size.value())
+        text_format.setFontWeight(
+            QFont.Weight.Bold if self.bold.isChecked() else QFont.Weight.Normal
+        )
+        text_format.setFontItalic(self.italic.isChecked())
+        self.editor.mergeCurrentCharFormat(text_format)
+
+    def _caption_font_changed(self, _font: QFont):
+        self._caption_format_changed()
+
+    def _set_alignment(self, justification: str):
+        self._set_alignment_button(justification)
+        self.editor.setAlignment(qt_alignment_from_caption(justification))
+
+    def _set_alignment_button(self, justification: str):
+        self._updating_toolbar = True
+        for name, button in self.alignment_buttons.items():
+            button.setChecked(name == justification)
+        self._updating_toolbar = False
+
+    def _load_text_format(self, text_format: QTextCharFormat):
+        self._updating_toolbar = True
+        self.font_family.setCurrentFont(
+            QFont(caption_font_family_from_qt_format(text_format))
+        )
+        self.font_size.setValue(caption_font_size_from_qt_format(text_format))
+        self.bold.setChecked(text_format.font().bold())
+        self.italic.setChecked(text_format.font().italic())
+        self._updating_toolbar = False
+
+    def _load_alignment(self):
+        self._set_alignment_button(
+            caption_justification_from_qt_alignment(self.editor.alignment())
+        )
+
+
+class WindowDialog(QDialog):
+    def __init__(
+        self,
+        settings: RenderSettings,
+        parent: QWidget | None = None,
+        preview_image: Image.Image | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Edit Window")
+        self.resize(620, 620)
+        self._base_settings = settings
+        self._updating_from_view = False
+
+        layout = QVBoxLayout(self)
+        self.preview = None
+        if preview_image is not None:
+            self.preview = SourceWindowView(preview_image, settings)
+            self.preview.set_crop_changed_callback(self._crop_changed_from_view)
+            layout.addWidget(self.preview, 1)
+
+        form = QFormLayout()
+
+        self.shape_choice = QComboBox()
+        self.shape_choice.addItems(["Rectangle", "Oval", "Circle", "Arched top"])
+        self.shape_choice.setCurrentText(settings.window_shape)
+        self.shape_choice.currentTextChanged.connect(self._preview_controls_changed)
+        form.addRow("Shape", self.shape_choice)
+
+        self.image_area = labelled_slider(10, 100, settings.image_area_percent, "%")
+        self.crop_x = labelled_slider(-100, 100, settings.crop_x_percent, "%")
+        self.crop_y = labelled_slider(-100, 100, settings.crop_y_percent, "%")
+        self.image_area.valueChanged.connect(self._preview_controls_changed)
+        self.crop_x.valueChanged.connect(self._preview_controls_changed)
+        self.crop_y.valueChanged.connect(self._preview_controls_changed)
+        form.addRow("Window size", self.image_area)
+        form.addRow("Fine horizontal", self.crop_x)
+        form.addRow("Fine vertical", self.crop_y)
+        layout.addLayout(form)
+
+        hint = QLabel(
+            "Drag the clear window over the image. The greyed area is outside the "
+            "card window; both stereo eyes keep the same linked crop."
+        )
+        hint.setWordWrap(True)
+        hint.setObjectName("hintText")
+        layout.addWidget(hint)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Cancel | QDialogButtonBox.StandardButton.Ok
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    @property
+    def window_shape(self) -> str:
+        return self.shape_choice.currentText()
+
+    @property
+    def image_area_percent(self) -> int:
+        return self.image_area.value()
+
+    @property
+    def crop_x_percent(self) -> int:
+        return self.crop_x.value()
+
+    @property
+    def crop_y_percent(self) -> int:
+        return self.crop_y.value()
+
+    def _preview_settings(self) -> RenderSettings:
+        return replace(
+            self._base_settings,
+            window_shape=self.window_shape,
+            image_area_percent=self.image_area_percent,
+            crop_x_percent=self.crop_x_percent,
+            crop_y_percent=self.crop_y_percent,
+        )
+
+    def _preview_controls_changed(self, *_args):
+        if self._updating_from_view or self.preview is None:
+            return
+        self.preview.set_settings(self._preview_settings())
+
+    def _crop_changed_from_view(self, crop_x_percent: int, crop_y_percent: int):
+        self._updating_from_view = True
+        self.crop_x.setValue(crop_x_percent)
+        self.crop_y.setValue(crop_y_percent)
+        self._updating_from_view = False
+        if self.preview is not None:
+            self.preview.set_settings(self._preview_settings())
 
 
 class ExportDialog(QDialog):
@@ -1035,6 +1387,71 @@ def caption_editor_toolbar(
         layout.addWidget(control)
     layout.addStretch(1)
     return widget
+
+
+def labelled_slider(
+    minimum: int, maximum: int, value: int, suffix: str = ""
+) -> QSlider:
+    slider = QSlider(Qt.Orientation.Horizontal)
+    slider.setRange(minimum, maximum)
+    slider.setValue(value)
+    slider.setToolTip(f"{value}{suffix}")
+    slider.valueChanged.connect(
+        lambda new_value: slider.setToolTip(f"{new_value}{suffix}")
+    )
+    return slider
+
+
+def source_window_aspect_size(settings: RenderSettings) -> tuple[int, int]:
+    spec = CARD_FORMATS[settings.layout_template]
+    width_mm, height_mm = spec["image_mm"]
+    return max(1, round((width_mm / height_mm) * 1000)), 1000
+
+
+def window_shape_path(rect: QRectF, shape: str) -> QPainterPath:
+    path = QPainterPath()
+    if shape == "Oval":
+        path.addEllipse(rect)
+    elif shape == "Circle":
+        diameter = min(rect.width(), rect.height())
+        circle = QRectF(
+            rect.x() + (rect.width() - diameter) / 2,
+            rect.y() + (rect.height() - diameter) / 2,
+            diameter,
+            diameter,
+        )
+        path.addEllipse(circle)
+    elif shape == "Arched top":
+        arch_height = min(rect.height(), rect.width() / 2)
+        path.moveTo(rect.left(), rect.bottom())
+        path.lineTo(rect.left(), rect.top() + arch_height)
+        path.arcTo(
+            QRectF(
+                rect.left(),
+                rect.top(),
+                rect.width(),
+                arch_height * 2,
+            ),
+            180,
+            -180,
+        )
+        path.lineTo(rect.right(), rect.bottom())
+        path.closeSubpath()
+    else:
+        path.addRect(rect)
+    return path
+
+
+def clamp(value: int, minimum: int, maximum: int) -> int:
+    if maximum < minimum:
+        return minimum
+    return max(minimum, min(maximum, value))
+
+
+def percent_for_axis_origin(max_offset: int, origin: int) -> int:
+    if max_offset <= 0:
+        return 0
+    return round((clamp(origin, 0, max_offset) / max_offset) * 200 - 100)
 
 
 def make_editor_button(icon_name: str, tooltip: str, checked: bool) -> QToolButton:
