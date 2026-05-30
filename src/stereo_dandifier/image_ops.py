@@ -83,12 +83,13 @@ def render_card(
 
     left_x, right_x = stereo_window_x_positions(card_w, image_w, spacing)
     image_y = top_margin
+    window_shape = effective_window_shape(settings)
     paste_window(
         card,
         left_fit,
         left_x,
         image_y,
-        settings.window_shape,
+        window_shape,
         round_corners=settings.window_round_corners,
     )
     paste_window(
@@ -96,7 +97,7 @@ def render_card(
         right_fit,
         right_x,
         image_y,
-        settings.window_shape,
+        window_shape,
         round_corners=settings.window_round_corners,
     )
 
@@ -494,6 +495,21 @@ def paste_window(
         )
 
 
+def effective_window_shape(settings: RenderSettings) -> str:
+    shape = settings.window_shape
+    if shape not in {"Rectangle", "Circle", "Oval", "Arched top"}:
+        return "Rectangle"
+
+    spec = CARD_FORMATS[settings.layout_template]
+    image_w, image_h = spec.image_mm
+    rectangular = abs(image_w - image_h) > 0.01
+    if shape == "Circle" and rectangular:
+        return "Oval"
+    if shape == "Oval" and not rectangular:
+        return "Circle"
+    return shape
+
+
 def window_mask(
     width: int, height: int, shape: str, round_corners: bool = False
 ) -> Image.Image:
@@ -502,7 +518,9 @@ def window_mask(
 
     mask = Image.new("L", (width, height), 0)
     draw = ImageDraw.Draw(mask)
-    if shape == "Circle":
+    if shape == "Oval":
+        draw.ellipse((0, 0, width - 1, height - 1), fill=255)
+    elif shape == "Circle":
         diameter = min(width, height)
         left = (width - diameter) // 2
         top = (height - diameter) // 2
@@ -635,7 +653,9 @@ def draw_window_boundary(
     round_corners: bool = False,
 ):
     outline = (220, 220, 220)
-    if shape == "Circle":
+    if shape == "Oval":
+        draw.ellipse((x, y, x + width, y + height), outline=outline, width=1)
+    elif shape == "Circle":
         diameter = min(width, height)
         left = x + (width - diameter) // 2
         top = y + (height - diameter) // 2

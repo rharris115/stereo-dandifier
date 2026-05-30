@@ -20,6 +20,7 @@ from stereo_dandifier.ui import (
     left_thumbnail_image,
     resize_crop_box_for_handle,
     window_shape_path,
+    window_shapes_for_layout,
 )
 from stereo_dandifier.models import ProjectImage, RenderSettings
 from stereo_dandifier.print_layout import default_page_layout, page_layout_for_name
@@ -136,10 +137,21 @@ def test_caption_placement_updates_current_card_settings(tmp_path):
     app = QApplication.instance() or QApplication([])
     dialog = CaptionDialog(RenderSettings(caption_position="Left image"))
 
-    dialog.position_choice.setCurrentText("Right image")
+    dialog.caption_under_left.setChecked(False)
+    dialog.caption_under_right.setChecked(True)
 
     assert app is not None
     assert dialog.caption_position == "Right image"
+
+
+def test_caption_placement_controls_are_below_editor(tmp_path):
+    app = QApplication.instance() or QApplication([])
+    dialog = CaptionDialog(RenderSettings())
+
+    layout = dialog.layout()
+
+    assert app is not None
+    assert layout.indexOf(dialog.caption_placement_row) > layout.indexOf(dialog.editor)
 
 
 def test_caption_typography_updates_current_card_settings(tmp_path):
@@ -224,10 +236,24 @@ def test_card_preview_has_separate_window_and_caption_hotspots(tmp_path):
 
     window._import_paths([path])
 
-    callbacks = [callback for _bounds, callback in window.card_view._hotspots]
+    callbacks = [callback for _bounds, callback, _tooltip in window.card_view._hotspots]
     assert app is not None
     assert callbacks.count(window.edit_window) == 2
     assert callbacks.count(window.edit_caption) == 2
+
+
+def test_card_preview_hotspots_have_editing_tooltips(tmp_path):
+    app = QApplication.instance() or QApplication([])
+    path = tmp_path / "card.png"
+    Image.new("RGB", (8, 4), (255, 0, 0)).save(path)
+    window = StereoDandifierWindow()
+
+    window._import_paths([path])
+
+    tooltips = [tooltip for _bounds, _callback, tooltip in window.card_view._hotspots]
+    assert app is not None
+    assert any("stereo window" in tooltip for tooltip in tooltips)
+    assert any("caption" in tooltip for tooltip in tooltips)
 
 
 def test_window_dialog_exposes_shape_size_and_crop_controls():
@@ -252,13 +278,18 @@ def test_window_dialog_exposes_shape_size_and_crop_controls():
     assert dialog.crop_x_percent == 15
     assert dialog.crop_y_percent == -10
     assert dialog.preview is not None
-    assert "Oval" not in dialog.shape_buttons
+    assert "Oval" in dialog.shape_buttons
+    assert "Circle" not in dialog.shape_buttons
 
 
 def test_window_dialog_disables_round_corners_for_circle_shape():
     app = QApplication.instance() or QApplication([])
     dialog = WindowDialog(
-        RenderSettings(window_shape="Rectangle", window_round_corners=True),
+        RenderSettings(
+            layout_template="holmes_standard",
+            window_shape="Rectangle",
+            window_round_corners=True,
+        ),
         preview_image=Image.new("RGB", (100, 80), (120, 130, 140)),
     )
 
@@ -267,6 +298,12 @@ def test_window_dialog_disables_round_corners_for_circle_shape():
     assert app is not None
     assert not dialog.round_corners.isEnabled()
     assert not dialog.window_round_corners
+
+
+def test_window_dialog_uses_oval_for_rectangular_layouts():
+    settings = RenderSettings(layout_template="owl_recommended")
+
+    assert window_shapes_for_layout(settings) == ("Rectangle", "Oval", "Arched top")
 
 
 def test_window_dialog_keeps_round_corners_for_rectangle_shape():

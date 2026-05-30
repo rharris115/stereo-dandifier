@@ -17,6 +17,7 @@ from stereo_dandifier.image_ops import (
     centered_caption_y,
     crop_axis_origin,
     crop_to_window,
+    effective_window_shape,
     export_dpi_for_source,
     card_grid,
     native_card_image_dpi,
@@ -248,7 +249,7 @@ def test_caption_is_centered_between_visible_image_bottom_and_card_bottom():
 
 
 def test_circle_window_masks_window_corners():
-    settings = RenderSettings(window_shape="Circle")
+    settings = RenderSettings(layout_template="holmes_standard", window_shape="Circle")
     source = Image.new("RGB", (800, 300), (255, 0, 0))
 
     card = render_card(source, source, settings, dpi=300)
@@ -260,6 +261,12 @@ def test_circle_window_masks_window_corners():
 
     assert card.getpixel((left_x, 95)) == (255, 255, 255)
     assert card.getpixel((left_x + 413, 95 + 413)) == (255, 0, 0)
+
+
+def test_rectangular_layouts_render_circle_choice_as_oval():
+    settings = RenderSettings(layout_template="owl_recommended", window_shape="Circle")
+
+    assert effective_window_shape(settings) == "Oval"
 
 
 def test_window_crop_offset_selects_different_source_area():

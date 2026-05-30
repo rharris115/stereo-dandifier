@@ -1,11 +1,12 @@
 from dataclasses import replace
+from importlib import resources
 from pathlib import Path
 from typing import Callable
 
 from PIL import Image
 from PIL.ImageQt import ImageQt
 
-from PySide6.QtCore import QRectF, QSize, Qt
+from PySide6.QtCore import QPoint, QRectF, QSize, Qt
 from PySide6.QtGui import (
     QAction,
     QBrush,
@@ -62,6 +63,7 @@ from stereo_dandifier.image_ops import (
     render_project_card,
     save_pdf_pages,
     score_comfort,
+    effective_window_shape,
     source_crop_box,
     split_stereo_pair,
     window_bounds_for_project,
@@ -82,6 +84,41 @@ from stereo_dandifier.print_layout import (
 
 SUPPORTED_IMAGE_FILTER = "Images (*.jpg *.jpeg *.png *.dng *.mpo *.tif *.tiff)"
 MIN_CARD_EDITOR_DPI = FALLBACK_PREVIEW_DPI
+_WALLPAPER_PIXMAP: QPixmap | None = None
+_WALLPAPER_LOAD_ATTEMPTED = False
+
+
+def wallpaper_pixmap() -> QPixmap | None:
+    global _WALLPAPER_LOAD_ATTEMPTED, _WALLPAPER_PIXMAP
+
+    if _WALLPAPER_LOAD_ATTEMPTED:
+        return _WALLPAPER_PIXMAP
+
+    _WALLPAPER_LOAD_ATTEMPTED = True
+    try:
+        wallpaper_path = resources.files("stereo_dandifier.resources").joinpath(
+            "wallpaper.png"
+        )
+        pixmap = QPixmap(str(wallpaper_path))
+        if not pixmap.isNull():
+            _WALLPAPER_PIXMAP = pixmap
+    except FileNotFoundError, ModuleNotFoundError:
+        pass
+    return _WALLPAPER_PIXMAP
+
+
+def draw_wallpaper_background(view: QGraphicsView, painter: QPainter):
+    painter.save()
+    painter.resetTransform()
+    pixmap = wallpaper_pixmap()
+    viewport_rect = view.viewport().rect()
+    if pixmap is None:
+        painter.fillRect(viewport_rect, QColor(235, 230, 220))
+    else:
+        pixmap = QPixmap(pixmap)
+        pixmap.setDevicePixelRatio(view.devicePixelRatioF())
+        painter.drawTiledPixmap(viewport_rect, pixmap, QPoint(0, 0))
+    painter.restore()
 
 
 class ZoomableImageView(QGraphicsView):
@@ -101,7 +138,10 @@ class ZoomableImageView(QGraphicsView):
         self._hotspot_item.setVisible(False)
         self._zoom = 0
         self._has_image = False
-        self._hotspots: list[tuple[QRectF, Callable[[], None]]] = []
+        self._default_tooltip = (
+            "Mouse wheel zooms. Drag pans. Double-click fits the image."
+        )
+        self._hotspots: list[tuple[QRectF, Callable[[], None], str]] = []
 
         self._scene.addItem(self._placeholder)
         self._scene.addItem(self._pixmap_item)
@@ -118,7 +158,7 @@ class ZoomableImageView(QGraphicsView):
         self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
         self.setResizeAnchor(QGraphicsView.ViewportAnchor.AnchorViewCenter)
         self.setMinimumSize(360, 320)
-        self.setToolTip("Mouse wheel zooms. Drag pans. Double-click fits the image.")
+        self.setToolTip(self._default_tooltip)
         self.setMouseTracking(True)
 
     def set_image(self, image: Image.Image, reset_view: bool = False):
@@ -143,14 +183,17 @@ class ZoomableImageView(QGraphicsView):
         self.resetTransform()
 
     def set_hotspots(self, bounds: list[tuple[int, int, int, int]], callback):
-        self.set_hotspot_actions([(bound, callback) for bound in bounds])
+        self.set_hotspot_actions(
+            [(bound, callback, self._default_tooltip) for bound in bounds]
+        )
 
     def set_hotspot_actions(
-        self, hotspots: list[tuple[tuple[int, int, int, int], Callable[[], None]]]
+        self,
+        hotspots: list[tuple[tuple[int, int, int, int], Callable[[], None], str]],
     ):
         self._hotspots = [
-            (QRectF(x, y, width, height), callback)
-            for (x, y, width, height), callback in hotspots
+            (QRectF(x, y, width, height), callback, tooltip)
+            for (x, y, width, height), callback, tooltip in hotspots
         ]
         self._hotspot_item.setVisible(False)
 
@@ -185,42 +228,42 @@ class ZoomableImageView(QGraphicsView):
         self.fit_to_view()
         super().mouseDoubleClickEvent(event)
 
+    def drawBackground(self, painter, rect):
+        draw_wallpaper_background(self, painter)
+
     def mouseMoveEvent(self, event):
-        hotspot = self._hotspot_bounds_at(event.position().toPoint())
+        hotspot = self._hotspot_at(event.position().toPoint())
         if hotspot is None:
             self._hotspot_item.setVisible(False)
             self.viewport().unsetCursor()
+            self.setToolTip(self._default_tooltip)
         else:
-            self._hotspot_item.setRect(hotspot)
+            bounds, _callback, tooltip = hotspot
+            self._hotspot_item.setRect(bounds)
             self._hotspot_item.setVisible(True)
             self.viewport().setCursor(Qt.CursorShape.PointingHandCursor)
+            self.setToolTip(tooltip)
         super().mouseMoveEvent(event)
 
     def leaveEvent(self, event):
         self._hotspot_item.setVisible(False)
         self.viewport().unsetCursor()
+        self.setToolTip(self._default_tooltip)
         super().leaveEvent(event)
 
     def mousePressEvent(self, event):
         hotspot = self._hotspot_at(event.position().toPoint())
         if event.button() == Qt.MouseButton.LeftButton and hotspot is not None:
-            _bounds, callback = hotspot
+            _bounds, callback, _tooltip = hotspot
             callback()
             return
         super().mousePressEvent(event)
 
     def _hotspot_at(self, viewport_position):
         scene_position = self.mapToScene(viewport_position)
-        for hotspot, callback in self._hotspots:
+        for hotspot, callback, tooltip in self._hotspots:
             if hotspot.contains(scene_position):
-                return hotspot, callback
-        return None
-
-    def _hotspot_bounds_at(self, viewport_position):
-        match = self._hotspot_at(viewport_position)
-        if match is not None:
-            hotspot, _callback = match
-            return hotspot
+                return hotspot, callback, tooltip
         return None
 
     def resizeEvent(self, event):
@@ -270,6 +313,9 @@ class SourceWindowView(QGraphicsView):
         self.setMinimumSize(360, 260)
         self.setMouseTracking(True)
         self._update_overlay()
+
+    def drawBackground(self, painter, rect):
+        draw_wallpaper_background(self, painter)
 
     def set_crop_changed_callback(self, callback: Callable[[int, int, int], None]):
         self._crop_changed_callback = callback
@@ -378,7 +424,7 @@ class SourceWindowView(QGraphicsView):
     def _window_path(self) -> QPainterPath:
         return window_shape_path(
             self._crop_rect(),
-            self._settings.window_shape,
+            effective_window_shape(self._settings),
             round_corners=self._settings.window_round_corners,
         )
 
@@ -960,11 +1006,15 @@ class StereoDandifierWindow(QMainWindow):
         self.card_view.set_hotspot_actions(
             [
                 *[
-                    (bounds, self.edit_window)
+                    (
+                        bounds,
+                        self.edit_window,
+                        "Click to edit the stereo window crop and shape.",
+                    )
                     for bounds in window_bounds_for_project(current, preview_dpi)
                 ],
                 *[
-                    (bounds, self.edit_caption)
+                    (bounds, self.edit_caption, "Click to edit the card caption.")
                     for bounds in caption_bounds_for_project(current, preview_dpi)
                 ],
             ]
@@ -1087,13 +1137,6 @@ class CaptionDialog(QDialog):
         self._updating_toolbar = False
 
         layout = QVBoxLayout(self)
-        form = QFormLayout()
-
-        self.position_choice = QComboBox()
-        self.position_choice.addItems(["Both images", "Left image", "Right image"])
-        self.position_choice.setCurrentText(settings.caption_position)
-        form.addRow("Placement", self.position_choice)
-        layout.addLayout(form)
 
         self.font_family = QFontComboBox()
         self.font_size = QSpinBox()
@@ -1109,6 +1152,11 @@ class CaptionDialog(QDialog):
             "Center": self.align_center,
             "Right": self.align_right,
         }
+        self.caption_under_left = QCheckBox("Under left")
+        self.caption_under_right = QCheckBox("Under right")
+        self._set_caption_position_checks(settings.caption_position)
+        self.caption_under_left.toggled.connect(self._caption_position_changed)
+        self.caption_under_right.toggled.connect(self._caption_position_changed)
 
         layout.addWidget(
             caption_editor_toolbar(
@@ -1130,6 +1178,11 @@ class CaptionDialog(QDialog):
         else:
             self.editor.clear()
         layout.addWidget(self.editor, 1)
+        self.caption_placement_row = caption_placement_controls(
+            self.caption_under_left,
+            self.caption_under_right,
+        )
+        layout.addWidget(self.caption_placement_row)
 
         self.font_family.currentFontChanged.connect(self._caption_font_changed)
         self.font_size.valueChanged.connect(self._caption_format_changed)
@@ -1159,7 +1212,13 @@ class CaptionDialog(QDialog):
 
     @property
     def caption_position(self) -> str:
-        return self.position_choice.currentText()
+        left = self.caption_under_left.isChecked()
+        right = self.caption_under_right.isChecked()
+        if left and not right:
+            return "Left image"
+        if right and not left:
+            return "Right image"
+        return "Both images"
 
     def _caption_format_changed(self, *_args):
         if self._updating_toolbar:
@@ -1202,6 +1261,23 @@ class CaptionDialog(QDialog):
             caption_justification_from_qt_alignment(self.editor.alignment())
         )
 
+    def _set_caption_position_checks(self, caption_position: str):
+        self.caption_under_left.setChecked(caption_position != "Right image")
+        self.caption_under_right.setChecked(caption_position != "Left image")
+
+    def _caption_position_changed(self):
+        if self.caption_under_left.isChecked() or self.caption_under_right.isChecked():
+            return
+        sender = self.sender()
+        fallback = (
+            self.caption_under_right
+            if sender is self.caption_under_left
+            else self.caption_under_left
+        )
+        fallback.blockSignals(True)
+        fallback.setChecked(True)
+        fallback.blockSignals(False)
+
 
 class WindowDialog(QDialog):
     def __init__(
@@ -1233,14 +1309,14 @@ class WindowDialog(QDialog):
         controls_layout = QHBoxLayout(controls)
         controls_layout.setContentsMargins(0, 0, 0, 0)
         controls_layout.setSpacing(10)
+        controls_layout.addStretch(1)
         shape_label = QLabel("Shape")
         controls_layout.addWidget(shape_label)
-        selected_shape = (
-            settings.window_shape
-            if settings.window_shape in WINDOW_SHAPES
-            else "Rectangle"
-        )
-        for shape in WINDOW_SHAPES:
+        window_shapes = window_shapes_for_layout(settings)
+        selected_shape = effective_window_shape(settings)
+        if selected_shape not in window_shapes:
+            selected_shape = "Rectangle"
+        for shape in window_shapes:
             button = make_shape_button(shape, checked=shape == selected_shape)
             button.clicked.connect(self._preview_controls_changed)
             self.shape_button_group.addButton(button)
@@ -1284,7 +1360,10 @@ class WindowDialog(QDialog):
 
     @property
     def window_round_corners(self) -> bool:
-        return self.window_shape != "Circle" and self.round_corners.isChecked()
+        return (
+            self.window_shape not in {"Circle", "Oval"}
+            and self.round_corners.isChecked()
+        )
 
     @property
     def crop_x_percent(self) -> int:
@@ -1322,12 +1401,12 @@ class WindowDialog(QDialog):
             self.preview.set_settings(self._preview_settings())
 
     def _update_round_corners_state(self):
-        is_circle = self.window_shape == "Circle"
-        if is_circle and self.round_corners.isChecked():
+        has_no_corners = self.window_shape in {"Circle", "Oval"}
+        if has_no_corners and self.round_corners.isChecked():
             self.round_corners.blockSignals(True)
             self.round_corners.setChecked(False)
             self.round_corners.blockSignals(False)
-        self.round_corners.setEnabled(not is_circle)
+        self.round_corners.setEnabled(not has_no_corners)
 
 
 class ExportDialog(QDialog):
@@ -1500,6 +1579,21 @@ def caption_editor_toolbar(
     return widget
 
 
+def caption_placement_controls(
+    caption_under_left: QCheckBox,
+    caption_under_right: QCheckBox,
+) -> QWidget:
+    widget = QWidget()
+    layout = QHBoxLayout(widget)
+    layout.setContentsMargins(0, 0, 0, 0)
+    layout.setSpacing(10)
+    layout.addStretch(1)
+    layout.addWidget(caption_under_left)
+    layout.addWidget(caption_under_right)
+    layout.addStretch(1)
+    return widget
+
+
 def source_window_aspect_size(settings: RenderSettings) -> tuple[int, int]:
     spec = CARD_FORMATS[settings.layout_template]
     width_mm, height_mm = spec.image_mm
@@ -1577,7 +1671,9 @@ def window_shape_path(
     rect: QRectF, shape: str, round_corners: bool = False
 ) -> QPainterPath:
     path = QPainterPath()
-    if shape == "Circle":
+    if shape == "Oval":
+        path.addEllipse(rect)
+    elif shape == "Circle":
         diameter = min(rect.width(), rect.height())
         circle = QRectF(
             rect.x() + (rect.width() - diameter) / 2,
@@ -1647,7 +1743,11 @@ def percent_for_axis_origin(max_offset: int, origin: int) -> int:
     return round((clamp(origin, 0, max_offset) / max_offset) * 200 - 100)
 
 
-WINDOW_SHAPES = ("Rectangle", "Circle", "Arched top")
+def window_shapes_for_layout(settings: RenderSettings) -> tuple[str, str, str]:
+    spec = CARD_FORMATS[settings.layout_template]
+    image_w, image_h = spec.image_mm
+    round_shape = "Oval" if abs(image_w - image_h) > 0.01 else "Circle"
+    return ("Rectangle", round_shape, "Arched top")
 
 
 def make_shape_button(shape: str, checked: bool) -> QToolButton:
