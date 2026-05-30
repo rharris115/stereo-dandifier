@@ -13,6 +13,7 @@ from stereo_dandifier.image_ops import (
     caption_html_text,
     caption_positions,
     caption_windows,
+    card_window_geometry,
     centered_caption_y,
     crop_axis_origin,
     crop_to_window,
@@ -57,7 +58,7 @@ def test_render_card_uses_selected_format_size(name, spec):
     left, right = split_stereo_pair(source, settings)
     card = render_card(left, right, settings)
 
-    assert card.size == mm_pair_to_px(spec["card_mm"])
+    assert card.size == mm_pair_to_px(spec.card_mm)
 
 
 def test_render_card_can_use_higher_preview_dpi():
@@ -68,27 +69,27 @@ def test_render_card_can_use_higher_preview_dpi():
     card = render_card(left, right, settings, dpi=600)
 
     assert card.size == mm_pair_to_px(
-        CARD_FORMATS[settings.layout_template]["card_mm"], dpi=600
+        CARD_FORMATS[settings.layout_template].card_mm, dpi=600
     )
 
 
 def test_native_card_image_dpi_uses_original_eye_pixels_and_card_window_size():
     source = Image.new("RGB", (4000, 2000), (120, 130, 140))
-    settings = RenderSettings(layout_template="Holmes (standard)")
+    settings = RenderSettings(layout_template="holmes_standard")
 
     assert native_card_image_dpi(source, settings) == 726
 
 
 def test_export_dpi_uses_native_source_detail_above_preview_floor():
     source = Image.new("RGB", (12000, 6000), (120, 130, 140))
-    settings = RenderSettings(layout_template="Holmes (standard)")
+    settings = RenderSettings(layout_template="holmes_standard")
 
     assert export_dpi_for_source(source, settings, minimum_dpi=600) == 2177
 
 
 def test_export_dpi_never_drops_below_preview_floor():
     source = Image.new("RGB", (1000, 500), (120, 130, 140))
-    settings = RenderSettings(layout_template="Holmes (standard)")
+    settings = RenderSettings(layout_template="holmes_standard")
 
     assert export_dpi_for_source(source, settings, minimum_dpi=600) == 600
 
@@ -96,7 +97,7 @@ def test_export_dpi_never_drops_below_preview_floor():
 def test_export_dpi_can_use_source_metadata_dpi():
     source = Image.new("RGB", (1000, 500), (120, 130, 140))
     source.info["dpi"] = (720, 720)
-    settings = RenderSettings(layout_template="Holmes (standard)")
+    settings = RenderSettings(layout_template="holmes_standard")
 
     assert export_dpi_for_source(source, settings, minimum_dpi=1) == 720
 
@@ -145,12 +146,9 @@ def test_stereo_window_positions_center_pair_on_card():
 
 @pytest.mark.parametrize("name,spec", CARD_FORMATS.items())
 def test_rendered_window_pair_has_balanced_outer_margins(name, spec):
-    card_w, _card_h = mm_pair_to_px(spec["card_mm"])
-    image_w, _image_h = mm_pair_to_px(spec["image_mm"])
-    if spec["gap_mm"] is None:
-        spacing = mm_to_px(spec["center_spacing_mm"])
-    else:
-        spacing = image_w + mm_to_px(spec["gap_mm"])
+    card_w, _card_h = mm_pair_to_px(spec.card_mm)
+    image_w, _image_h = mm_pair_to_px(spec.image_mm)
+    spacing = mm_to_px(spec.center_spacing_mm)
 
     left_x, right_x = stereo_window_x_positions(card_w, image_w, spacing)
     left_margin = left_x
@@ -234,8 +232,13 @@ def test_caption_is_centered_between_visible_image_bottom_and_card_bottom():
     right = Image.new("RGB", (800, 300), (120, 130, 140))
 
     card = render_card(left, right, settings, dpi=300)
-    visible_bottom = 95 + 827
-    caption_bbox = non_white_bbox(card, (165, visible_bottom, 992, card.height))
+    left_x, _right_x, top_margin, image_w, image_h, _spacing = card_window_geometry(
+        settings, dpi=300
+    )
+    visible_bottom = top_margin + image_h
+    caption_bbox = non_white_bbox(
+        card, (left_x, visible_bottom, left_x + image_w, card.height)
+    )
 
     assert app is not None
     assert caption_bbox is not None
@@ -244,8 +247,8 @@ def test_caption_is_centered_between_visible_image_bottom_and_card_bottom():
     assert abs(above - below) <= 8
 
 
-def test_oval_window_masks_window_corners():
-    settings = RenderSettings(window_shape="Oval")
+def test_circle_window_masks_window_corners():
+    settings = RenderSettings(window_shape="Circle")
     source = Image.new("RGB", (800, 300), (255, 0, 0))
 
     card = render_card(source, source, settings, dpi=300)
@@ -307,8 +310,25 @@ def test_window_mask_supports_classic_arched_top():
     mask = window_mask(20, 30, "Arched top")
 
     assert mask.getpixel((0, 0)) == 0
-    assert mask.getpixel((10, 0)) == 255
+    assert mask.getpixel((10, 0)) > 200
+    assert mask.getpixel((0, 5)) < 255
+    assert mask.getpixel((0, 8)) > 0
     assert mask.getpixel((0, 29)) == 255
+
+
+def test_window_mask_supports_rounded_rectangle_corners():
+    mask = window_mask(40, 60, "Rectangle", round_corners=True)
+
+    assert mask.getpixel((0, 0)) == 0
+    assert mask.getpixel((20, 0)) == 255
+    assert mask.getpixel((0, 30)) == 255
+
+
+def test_window_mask_supports_rounded_arched_bottom_corners():
+    mask = window_mask(40, 60, "Arched top", round_corners=True)
+
+    assert mask.getpixel((0, 59)) < 255
+    assert mask.getpixel((20, 59)) == 255
 
 
 def test_window_bounds_for_project_matches_rendered_window_pair(tmp_path):
@@ -320,7 +340,7 @@ def test_window_bounds_for_project_matches_rendered_window_pair(tmp_path):
 
     bounds = window_bounds_for_project(project_image, dpi=300)
 
-    assert bounds == [(200, 94, 827, 827), (1098, 94, 827, 827)]
+    assert bounds == [(201, 83, 850, 744), (1051, 83, 850, 744)]
 
 
 def test_black_and_white_mode_removes_colour():
@@ -370,7 +390,7 @@ def test_print_pages_maximise_cards_per_page():
     page_layout = page_layout_for_name("A4")
     card = Image.new(
         "RGB",
-        mm_pair_to_px(CARD_FORMATS["Holmes (standard)"]["card_mm"]),
+        mm_pair_to_px(CARD_FORMATS["holmes_standard"].card_mm),
         (255, 255, 255),
     )
 

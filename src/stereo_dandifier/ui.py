@@ -40,6 +40,7 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QMainWindow,
     QMessageBox,
+    QButtonGroup,
     QPushButton,
     QSlider,
     QSpinBox,
@@ -338,7 +339,11 @@ class SourceWindowView(QGraphicsView):
         )
 
     def _window_path(self) -> QPainterPath:
-        return window_shape_path(self._crop_rect(), self._settings.window_shape)
+        return window_shape_path(
+            self._crop_rect(),
+            self._settings.window_shape,
+            round_corners=self._settings.window_round_corners,
+        )
 
     def _update_overlay(self):
         image_path = QPainterPath()
@@ -617,6 +622,9 @@ class StereoDandifierWindow(QMainWindow):
                 background: #d8e7e0;
                 border-color: #8fb4a6;
             }
+            QCheckBox:disabled {
+                color: #9a9388;
+            }
             QGraphicsView#preview {
                 background: #ebe6dc;
                 border: 1px solid #d0c7b8;
@@ -857,6 +865,7 @@ class StereoDandifierWindow(QMainWindow):
             caption_html=current.settings.caption_html,
             caption_position=current.settings.caption_position,
             window_shape=current.settings.window_shape,
+            window_round_corners=current.settings.window_round_corners,
             image_area_percent=current.settings.image_area_percent,
             crop_x_percent=current.settings.crop_x_percent,
             crop_y_percent=current.settings.crop_y_percent,
@@ -924,6 +933,7 @@ class StereoDandifierWindow(QMainWindow):
         current.settings = replace(
             current.settings,
             window_shape=dialog.window_shape,
+            window_round_corners=dialog.window_round_corners,
             image_area_percent=dialog.image_area_percent,
             crop_x_percent=dialog.crop_x_percent,
             crop_y_percent=dialog.crop_y_percent,
@@ -945,8 +955,8 @@ class StereoDandifierWindow(QMainWindow):
             return
 
         spec = CARD_FORMATS[current.settings.layout_template]
-        card_w, card_h = spec["card_mm"]
-        image_w, image_h = spec["image_mm"]
+        card_w, card_h = spec.card_mm
+        image_w, image_h = spec.image_mm
         export_state = (
             "Included in export"
             if current.selected_for_export
@@ -1137,6 +1147,8 @@ class WindowDialog(QDialog):
         self.setWindowTitle("Edit Window")
         self.resize(620, 620)
         self._base_settings = settings
+        self._crop_x_percent = settings.crop_x_percent
+        self._crop_y_percent = settings.crop_y_percent
         self._updating_from_view = False
 
         layout = QVBoxLayout(self)
@@ -1146,24 +1158,41 @@ class WindowDialog(QDialog):
             self.preview.set_crop_changed_callback(self._crop_changed_from_view)
             layout.addWidget(self.preview, 1)
 
-        form = QFormLayout()
+        self.shape_buttons = {}
+        self.shape_button_group = QButtonGroup(self)
+        self.shape_button_group.setExclusive(True)
+        controls = QWidget()
+        controls_layout = QHBoxLayout(controls)
+        controls_layout.setContentsMargins(0, 0, 0, 0)
+        controls_layout.setSpacing(10)
+        shape_label = QLabel("Shape")
+        controls_layout.addWidget(shape_label)
+        selected_shape = (
+            settings.window_shape
+            if settings.window_shape in WINDOW_SHAPES
+            else "Rectangle"
+        )
+        for shape in WINDOW_SHAPES:
+            button = make_shape_button(shape, checked=shape == selected_shape)
+            button.clicked.connect(self._preview_controls_changed)
+            self.shape_button_group.addButton(button)
+            self.shape_buttons[shape] = button
+            controls_layout.addWidget(button)
 
-        self.shape_choice = QComboBox()
-        self.shape_choice.addItems(["Rectangle", "Oval", "Circle", "Arched top"])
-        self.shape_choice.setCurrentText(settings.window_shape)
-        self.shape_choice.currentTextChanged.connect(self._preview_controls_changed)
-        form.addRow("Shape", self.shape_choice)
+        self.round_corners = QCheckBox("Round corners")
+        self.round_corners.setChecked(settings.window_round_corners)
+        self.round_corners.toggled.connect(self._preview_controls_changed)
+        controls_layout.addWidget(self.round_corners)
+        self._update_round_corners_state()
 
         self.image_area = labelled_slider(10, 100, settings.image_area_percent, "%")
-        self.crop_x = labelled_slider(-100, 100, settings.crop_x_percent, "%")
-        self.crop_y = labelled_slider(-100, 100, settings.crop_y_percent, "%")
+        self.image_area.setFixedWidth(180)
         self.image_area.valueChanged.connect(self._preview_controls_changed)
-        self.crop_x.valueChanged.connect(self._preview_controls_changed)
-        self.crop_y.valueChanged.connect(self._preview_controls_changed)
-        form.addRow("Window size", self.image_area)
-        form.addRow("Fine horizontal", self.crop_x)
-        form.addRow("Fine vertical", self.crop_y)
-        layout.addLayout(form)
+        size_label = QLabel("Window size")
+        controls_layout.addWidget(size_label)
+        controls_layout.addWidget(self.image_area)
+        controls_layout.addStretch(1)
+        layout.addWidget(controls)
 
         hint = QLabel(
             "Drag the clear window over the image. The greyed area is outside the "
@@ -1182,41 +1211,58 @@ class WindowDialog(QDialog):
 
     @property
     def window_shape(self) -> str:
-        return self.shape_choice.currentText()
+        for shape, button in self.shape_buttons.items():
+            if button.isChecked():
+                return shape
+        return "Rectangle"
 
     @property
     def image_area_percent(self) -> int:
         return self.image_area.value()
 
     @property
+    def window_round_corners(self) -> bool:
+        return self.window_shape != "Circle" and self.round_corners.isChecked()
+
+    @property
     def crop_x_percent(self) -> int:
-        return self.crop_x.value()
+        return self._crop_x_percent
 
     @property
     def crop_y_percent(self) -> int:
-        return self.crop_y.value()
+        return self._crop_y_percent
 
     def _preview_settings(self) -> RenderSettings:
         return replace(
             self._base_settings,
             window_shape=self.window_shape,
+            window_round_corners=self.window_round_corners,
             image_area_percent=self.image_area_percent,
             crop_x_percent=self.crop_x_percent,
             crop_y_percent=self.crop_y_percent,
         )
 
     def _preview_controls_changed(self, *_args):
+        self._update_round_corners_state()
         if self._updating_from_view or self.preview is None:
             return
         self.preview.set_settings(self._preview_settings())
 
     def _crop_changed_from_view(self, crop_x_percent: int, crop_y_percent: int):
         self._updating_from_view = True
-        self.crop_x.setValue(crop_x_percent)
-        self.crop_y.setValue(crop_y_percent)
+        self._crop_x_percent = crop_x_percent
+        self._crop_y_percent = crop_y_percent
         self._updating_from_view = False
         if self.preview is not None:
             self.preview.set_settings(self._preview_settings())
+
+    def _update_round_corners_state(self):
+        is_circle = self.window_shape == "Circle"
+        if is_circle and self.round_corners.isChecked():
+            self.round_corners.blockSignals(True)
+            self.round_corners.setChecked(False)
+            self.round_corners.blockSignals(False)
+        self.round_corners.setEnabled(not is_circle)
 
 
 class ExportDialog(QDialog):
@@ -1404,15 +1450,15 @@ def labelled_slider(
 
 def source_window_aspect_size(settings: RenderSettings) -> tuple[int, int]:
     spec = CARD_FORMATS[settings.layout_template]
-    width_mm, height_mm = spec["image_mm"]
+    width_mm, height_mm = spec.image_mm
     return max(1, round((width_mm / height_mm) * 1000)), 1000
 
 
-def window_shape_path(rect: QRectF, shape: str) -> QPainterPath:
+def window_shape_path(
+    rect: QRectF, shape: str, round_corners: bool = False
+) -> QPainterPath:
     path = QPainterPath()
-    if shape == "Oval":
-        path.addEllipse(rect)
-    elif shape == "Circle":
+    if shape == "Circle":
         diameter = min(rect.width(), rect.height())
         circle = QRectF(
             rect.x() + (rect.width() - diameter) / 2,
@@ -1422,24 +1468,52 @@ def window_shape_path(rect: QRectF, shape: str) -> QPainterPath:
         )
         path.addEllipse(circle)
     elif shape == "Arched top":
-        arch_height = min(rect.height(), rect.width() / 2)
-        path.moveTo(rect.left(), rect.bottom())
-        path.lineTo(rect.left(), rect.top() + arch_height)
-        path.arcTo(
-            QRectF(
-                rect.left(),
-                rect.top(),
-                rect.width(),
-                arch_height * 2,
-            ),
-            180,
-            -180,
+        arch_height = arched_top_depth(rect.width(), rect.height())
+        radius = (
+            rounded_corner_radius(rect.width(), rect.height()) if round_corners else 0
         )
-        path.lineTo(rect.right(), rect.bottom())
+        center_x = rect.left() + rect.width() / 2
+        path.moveTo(rect.left() + radius, rect.bottom())
+        if radius:
+            path.quadTo(rect.left(), rect.bottom(), rect.left(), rect.bottom() - radius)
+        path.lineTo(rect.left(), rect.top() + arch_height)
+        path.quadTo(
+            rect.left(),
+            rect.top(),
+            center_x,
+            rect.top(),
+        )
+        path.quadTo(
+            rect.right(),
+            rect.top(),
+            rect.right(),
+            rect.top() + arch_height,
+        )
+        path.lineTo(rect.right(), rect.bottom() - radius)
+        if radius:
+            path.quadTo(
+                rect.right(),
+                rect.bottom(),
+                rect.right() - radius,
+                rect.bottom(),
+            )
+        else:
+            path.lineTo(rect.right(), rect.bottom())
         path.closeSubpath()
+    elif round_corners:
+        radius = rounded_corner_radius(rect.width(), rect.height())
+        path.addRoundedRect(rect, radius, radius)
     else:
         path.addRect(rect)
     return path
+
+
+def arched_top_depth(width: float, height: float) -> float:
+    return min(height * 0.24, width * 0.32)
+
+
+def rounded_corner_radius(width: float, height: float) -> float:
+    return max(1, min(width, height) * 0.08)
 
 
 def clamp(value: int, minimum: int, maximum: int) -> int:
@@ -1452,6 +1526,32 @@ def percent_for_axis_origin(max_offset: int, origin: int) -> int:
     if max_offset <= 0:
         return 0
     return round((clamp(origin, 0, max_offset) / max_offset) * 200 - 100)
+
+
+WINDOW_SHAPES = ("Rectangle", "Circle", "Arched top")
+
+
+def make_shape_button(shape: str, checked: bool) -> QToolButton:
+    button = QToolButton()
+    button.setCheckable(True)
+    button.setChecked(checked)
+    button.setIcon(shape_icon(shape))
+    button.setIconSize(QSize(26, 26))
+    button.setFixedSize(QSize(36, 34))
+    button.setToolTip(shape)
+    return button
+
+
+def shape_icon(shape: str) -> QIcon:
+    pixmap = QPixmap(32, 32)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    painter.setPen(QPen(Qt.GlobalColor.black, 2))
+    painter.setBrush(QBrush(Qt.BrushStyle.NoBrush))
+    painter.drawPath(window_shape_path(QRectF(6, 5, 20, 22), shape, round_corners=True))
+    painter.end()
+    return QIcon(pixmap)
 
 
 def make_editor_button(icon_name: str, tooltip: str, checked: bool) -> QToolButton:

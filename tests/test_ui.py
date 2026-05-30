@@ -51,7 +51,7 @@ def test_export_dialog_hides_render_dpi_detail(tmp_path):
     project_image = ProjectImage(
         path=tmp_path / "large.png",
         source=Image.new("RGB", (12000, 6000), (120, 130, 140)),
-        settings=RenderSettings(layout_template="Holmes (standard)"),
+        settings=RenderSettings(layout_template="holmes_standard"),
     )
     dialog = ExportDialog(default_layout, [project_image])
 
@@ -110,7 +110,7 @@ def test_editor_dpi_uses_source_detail_for_zoomable_card_preview(tmp_path):
     project_image = ProjectImage(
         path=tmp_path / "large.png",
         source=Image.new("RGB", (12000, 6000), (120, 130, 140)),
-        settings=RenderSettings(layout_template="Holmes (standard)"),
+        settings=RenderSettings(layout_template="holmes_standard"),
     )
 
     assert editor_dpi_for_image(project_image) == 2177
@@ -120,12 +120,12 @@ def test_export_dpi_for_images_uses_selected_originals(tmp_path):
     small = ProjectImage(
         path=tmp_path / "small.png",
         source=Image.new("RGB", (1000, 500), (120, 130, 140)),
-        settings=RenderSettings(layout_template="Holmes (standard)"),
+        settings=RenderSettings(layout_template="holmes_standard"),
     )
     large = ProjectImage(
         path=tmp_path / "large.png",
         source=Image.new("RGB", (12000, 6000), (120, 130, 140)),
-        settings=RenderSettings(layout_template="Holmes (standard)"),
+        settings=RenderSettings(layout_template="holmes_standard"),
     )
 
     assert export_dpi_for_images([small, large]) == 2177
@@ -233,8 +233,8 @@ def test_window_dialog_exposes_shape_size_and_crop_controls():
     app = QApplication.instance() or QApplication([])
     dialog = WindowDialog(
         RenderSettings(
-            layout_template="Realist print",
-            window_shape="Oval",
+            layout_template="owl_recommended",
+            window_shape="Circle",
             image_area_percent=75,
             crop_x_percent=-20,
             crop_y_percent=35,
@@ -242,10 +242,9 @@ def test_window_dialog_exposes_shape_size_and_crop_controls():
         preview_image=Image.new("RGB", (100, 80), (120, 130, 140)),
     )
 
-    dialog.shape_choice.setCurrentText("Arched top")
+    dialog.shape_buttons["Arched top"].click()
     dialog.image_area.setValue(50)
-    dialog.crop_x.setValue(15)
-    dialog.crop_y.setValue(-10)
+    dialog._crop_changed_from_view(15, -10)
 
     assert app is not None
     assert dialog.window_shape == "Arched top"
@@ -253,6 +252,33 @@ def test_window_dialog_exposes_shape_size_and_crop_controls():
     assert dialog.crop_x_percent == 15
     assert dialog.crop_y_percent == -10
     assert dialog.preview is not None
+    assert "Oval" not in dialog.shape_buttons
+
+
+def test_window_dialog_disables_round_corners_for_circle_shape():
+    app = QApplication.instance() or QApplication([])
+    dialog = WindowDialog(
+        RenderSettings(window_shape="Rectangle", window_round_corners=True),
+        preview_image=Image.new("RGB", (100, 80), (120, 130, 140)),
+    )
+
+    dialog.shape_buttons["Circle"].click()
+
+    assert app is not None
+    assert not dialog.round_corners.isEnabled()
+    assert not dialog.window_round_corners
+
+
+def test_window_dialog_keeps_round_corners_for_rectangle_shape():
+    app = QApplication.instance() or QApplication([])
+    dialog = WindowDialog(
+        RenderSettings(window_shape="Rectangle", window_round_corners=True),
+        preview_image=Image.new("RGB", (100, 80), (120, 130, 140)),
+    )
+
+    assert app is not None
+    assert dialog.round_corners.isEnabled()
+    assert dialog.window_round_corners
 
 
 def test_window_dialog_updates_position_from_drag_preview():
@@ -267,7 +293,7 @@ def test_window_dialog_updates_position_from_drag_preview():
     assert app is not None
     assert dialog.crop_x_percent == 100
     assert dialog.crop_y_percent == -100
-    assert dialog.preview._crop_box() == (50, 0, 100, 50)
+    assert dialog.preview._crop_box() == (43, 0, 100, 50)
 
 
 def test_source_window_view_greys_area_outside_window():
@@ -278,7 +304,7 @@ def test_source_window_view_greys_area_outside_window():
     )
 
     assert app is not None
-    assert view._window_item.path().boundingRect() == QRectF(25, 25, 50, 50)
+    assert view._window_item.path().boundingRect() == QRectF(22, 25, 57, 50)
     assert view._shade_item.path().contains(QRectF(0, 0, 10, 10).center())
 
 
@@ -286,7 +312,7 @@ def test_source_window_view_reflects_selected_window_shape():
     app = QApplication.instance() or QApplication([])
     view = SourceWindowView(
         Image.new("RGB", (100, 100), (120, 130, 140)),
-        RenderSettings(image_area_percent=50, window_shape="Oval"),
+        RenderSettings(image_area_percent=50, window_shape="Circle"),
     )
 
     assert app is not None
@@ -300,6 +326,14 @@ def test_window_shape_path_supports_arched_top():
     assert not path.contains(QRectF(10, 10, 1, 1).center())
     assert path.contains(QRectF(30, 10, 1, 1).center())
     assert path.contains(QRectF(10, 69, 1, 1).center())
+    assert not path.contains(QRectF(10, 12, 1, 1).center())
+
+
+def test_window_shape_path_supports_rounded_rectangle():
+    path = window_shape_path(QRectF(10, 10, 40, 60), "Rectangle", round_corners=True)
+
+    assert not path.contains(QRectF(10, 10, 1, 1).center())
+    assert path.contains(QRectF(30, 10, 1, 1).center())
 
 
 def text_fragments(caption_html: str):

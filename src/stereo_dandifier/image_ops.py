@@ -72,13 +72,10 @@ def render_card(
     dpi: int = EXPORT_DPI,
 ) -> Image.Image:
     spec = CARD_FORMATS[settings.layout_template]
-    card_w, card_h = mm_pair_to_px(spec["card_mm"], dpi=dpi)
-    image_w, image_h = mm_pair_to_px(spec["image_mm"], dpi=dpi)
-    top_margin = mm_to_px(spec["top_margin_mm"], dpi=dpi)
-    if spec["gap_mm"] is None:
-        spacing = mm_to_px(spec["center_spacing_mm"], dpi=dpi)
-    else:
-        spacing = mm_to_px(spec["center_spacing_mm"], dpi=dpi)
+    card_w, card_h = mm_pair_to_px(spec.card_mm, dpi=dpi)
+    image_w, image_h = mm_pair_to_px(spec.image_mm, dpi=dpi)
+    top_margin = mm_to_px(spec.top_margin_mm, dpi=dpi)
+    spacing = mm_to_px(spec.center_spacing_mm, dpi=dpi)
 
     card = Image.new("RGB", (card_w, card_h), (255, 255, 255))
     left_fit = crop_to_window(left, image_w, image_h, settings)
@@ -86,8 +83,22 @@ def render_card(
 
     left_x, right_x = stereo_window_x_positions(card_w, image_w, spacing)
     image_y = top_margin
-    paste_window(card, left_fit, left_x, image_y, settings.window_shape)
-    paste_window(card, right_fit, right_x, image_y, settings.window_shape)
+    paste_window(
+        card,
+        left_fit,
+        left_x,
+        image_y,
+        settings.window_shape,
+        round_corners=settings.window_round_corners,
+    )
+    paste_window(
+        card,
+        right_fit,
+        right_x,
+        image_y,
+        settings.window_shape,
+        round_corners=settings.window_round_corners,
+    )
 
     if caption_html_text(settings.caption_html):
         for window_x, visible_bottom in caption_windows(
@@ -118,10 +129,10 @@ def card_window_geometry(
     settings: RenderSettings, dpi: int
 ) -> tuple[int, int, int, int, int, int]:
     spec = CARD_FORMATS[settings.layout_template]
-    card_w, _card_h = mm_pair_to_px(spec["card_mm"], dpi=dpi)
-    image_w, image_h = mm_pair_to_px(spec["image_mm"], dpi=dpi)
-    top_margin = mm_to_px(spec["top_margin_mm"], dpi=dpi)
-    spacing = mm_to_px(spec["center_spacing_mm"], dpi=dpi)
+    card_w, _card_h = mm_pair_to_px(spec.card_mm, dpi=dpi)
+    image_w, image_h = mm_pair_to_px(spec.image_mm, dpi=dpi)
+    top_margin = mm_to_px(spec.top_margin_mm, dpi=dpi)
+    spacing = mm_to_px(spec.center_spacing_mm, dpi=dpi)
     left_x, right_x = stereo_window_x_positions(card_w, image_w, spacing)
     return left_x, right_x, top_margin, image_w, image_h, spacing
 
@@ -278,7 +289,7 @@ def centered_caption_y(
 
 def native_card_image_dpi(source: Image.Image, settings: RenderSettings) -> int:
     spec = CARD_FORMATS[settings.layout_template]
-    image_w_mm, image_h_mm = spec["image_mm"]
+    image_w_mm, image_h_mm = spec.image_mm
     left, _right = split_stereo_pair(source, settings)
 
     width_dpi = left.width / (image_w_mm / 25.4)
@@ -410,7 +421,7 @@ def caption_bounds_for_project(
 ) -> list[tuple[int, int, int, int]]:
     settings = project_image.settings
     spec = CARD_FORMATS[settings.layout_template]
-    _card_w, card_h = mm_pair_to_px(spec["card_mm"], dpi=dpi)
+    _card_w, card_h = mm_pair_to_px(spec.card_mm, dpi=dpi)
     left_x, right_x, top_margin, image_w, image_h, _spacing = card_window_geometry(
         settings, dpi
     )
@@ -470,63 +481,200 @@ def paste_window(
     x: int,
     y: int,
     shape: str = "Rectangle",
+    round_corners: bool = False,
     show_boundary: bool = False,
 ):
-    mask = window_mask(image.width, image.height, shape)
+    mask = window_mask(image.width, image.height, shape, round_corners=round_corners)
     card.paste(image, (x, y), mask)
 
     if show_boundary:
         draw = ImageDraw.Draw(card)
-        draw_window_boundary(draw, x, y, image.width, image.height, shape)
+        draw_window_boundary(
+            draw, x, y, image.width, image.height, shape, round_corners=round_corners
+        )
 
 
-def window_mask(width: int, height: int, shape: str) -> Image.Image:
+def window_mask(
+    width: int, height: int, shape: str, round_corners: bool = False
+) -> Image.Image:
+    if shape == "Arched top":
+        return arched_top_mask(width, height, round_corners=round_corners)
+
     mask = Image.new("L", (width, height), 0)
     draw = ImageDraw.Draw(mask)
-    if shape == "Oval":
-        draw.ellipse((0, 0, width - 1, height - 1), fill=255)
-    elif shape == "Circle":
+    if shape == "Circle":
         diameter = min(width, height)
         left = (width - diameter) // 2
         top = (height - diameter) // 2
         draw.ellipse((left, top, left + diameter - 1, top + diameter - 1), fill=255)
-    elif shape == "Arched top":
-        draw_arched_top(draw, width, height, fill=255)
+    elif round_corners:
+        radius = rounded_corner_radius(width, height)
+        draw.rounded_rectangle((0, 0, width - 1, height - 1), radius=radius, fill=255)
     else:
         draw.rectangle((0, 0, width - 1, height - 1), fill=255)
     return mask
 
 
-def draw_arched_top(draw: ImageDraw.ImageDraw, width: int, height: int, fill):
-    radius = width / 2
-    arch_height = min(height, round(radius))
-    draw.rectangle((0, arch_height, width - 1, height - 1), fill=fill)
-    draw.pieslice((0, 0, width - 1, arch_height * 2 - 1), 180, 360, fill=fill)
+def arched_top_mask(
+    width: int, height: int, round_corners: bool = False
+) -> Image.Image:
+    scale = 4
+    mask = Image.new("L", (width * scale, height * scale), 0)
+    draw = ImageDraw.Draw(mask)
+    draw_arched_top(
+        draw, width * scale, height * scale, fill=255, round_corners=round_corners
+    )
+    return mask.resize((width, height), Image.Resampling.LANCZOS)
+
+
+def draw_arched_top(
+    draw: ImageDraw.ImageDraw,
+    width: int,
+    height: int,
+    fill,
+    round_corners: bool = False,
+):
+    draw.polygon(
+        arched_top_points(width, height, round_corners=round_corners), fill=fill
+    )
+
+
+def arched_top_points(
+    width: int, height: int, round_corners: bool = False
+) -> list[tuple[int, int]]:
+    arch_height = arched_top_depth(width, height)
+    center = (width - 1) / 2
+    radius = rounded_corner_radius(width, height) if round_corners else 0
+    bottom_y = height - 1
+    left_bottom_x = radius
+    right_bottom_x = width - 1 - radius
+    points = [(left_bottom_x, bottom_y)]
+
+    if radius:
+        points.extend(
+            quarter_arc_points(
+                center_x=radius,
+                center_y=height - 1 - radius,
+                radius=radius,
+                start_degrees=90,
+                end_degrees=180,
+            )
+        )
+
+    points.append((0, arch_height))
+    steps = max(12, width // 8)
+
+    for index in range(steps + 1):
+        t = index / steps
+        x = quadratic_bezier(0, 0, center, t)
+        y = quadratic_bezier(arch_height, 0, 0, t)
+        points.append((round(x), round(y)))
+
+    for index in range(1, steps + 1):
+        t = index / steps
+        x = quadratic_bezier(center, width - 1, width - 1, t)
+        y = quadratic_bezier(0, 0, arch_height, t)
+        points.append((round(x), round(y)))
+
+    points.append((width - 1, arch_height))
+    if radius:
+        points.extend(
+            quarter_arc_points(
+                center_x=width - 1 - radius,
+                center_y=height - 1 - radius,
+                radius=radius,
+                start_degrees=0,
+                end_degrees=90,
+            )
+        )
+    points.append((right_bottom_x, bottom_y))
+    return points
+
+
+def quarter_arc_points(
+    center_x: int,
+    center_y: int,
+    radius: int,
+    start_degrees: int,
+    end_degrees: int,
+) -> list[tuple[int, int]]:
+    import math
+
+    steps = max(4, radius // 3)
+    return [
+        (
+            round(center_x + radius * math.cos(math.radians(degrees))),
+            round(center_y + radius * math.sin(math.radians(degrees))),
+        )
+        for degrees in [
+            start_degrees + ((end_degrees - start_degrees) * index / steps)
+            for index in range(steps + 1)
+        ]
+    ]
+
+
+def quadratic_bezier(start: float, control: float, end: float, t: float) -> float:
+    return ((1 - t) * (1 - t) * start) + (2 * (1 - t) * t * control) + (t * t * end)
+
+
+def arched_top_depth(width: int, height: int) -> int:
+    return max(1, round(min(height * 0.24, width * 0.32)))
+
+
+def rounded_corner_radius(width: int, height: int) -> int:
+    return max(1, round(min(width, height) * 0.08))
 
 
 def draw_window_boundary(
-    draw: ImageDraw.ImageDraw, x: int, y: int, width: int, height: int, shape: str
+    draw: ImageDraw.ImageDraw,
+    x: int,
+    y: int,
+    width: int,
+    height: int,
+    shape: str,
+    round_corners: bool = False,
 ):
     outline = (220, 220, 220)
-    if shape == "Oval":
-        draw.ellipse((x, y, x + width, y + height), outline=outline, width=1)
-    elif shape == "Circle":
+    if shape == "Circle":
         diameter = min(width, height)
         left = x + (width - diameter) // 2
         top = y + (height - diameter) // 2
         draw.ellipse((left, top, left + diameter, top + diameter), outline=outline)
     elif shape == "Arched top":
-        radius = width / 2
-        arch_height = min(height, round(radius))
+        arch_height = arched_top_depth(width, height)
         draw.line((x, y + arch_height, x, y + height), fill=outline)
         draw.line((x + width, y + arch_height, x + width, y + height), fill=outline)
         draw.line((x, y + height, x + width, y + height), fill=outline)
-        draw.arc(
-            (x, y, x + width, y + arch_height * 2),
-            180,
-            360,
-            fill=outline,
-            width=1,
+        points = [
+            (x + offset_x, y + offset_y)
+            for offset_x, offset_y in arched_top_points(width, height)[2:-2]
+        ]
+        draw.line(points, fill=outline, width=1)
+        if round_corners:
+            radius = rounded_corner_radius(width, height)
+            draw.arc(
+                (x, y + height - 1 - 2 * radius, x + 2 * radius, y + height - 1),
+                90,
+                180,
+                fill=outline,
+                width=1,
+            )
+            draw.arc(
+                (
+                    x + width - 1 - 2 * radius,
+                    y + height - 1 - 2 * radius,
+                    x + width - 1,
+                    y + height - 1,
+                ),
+                0,
+                90,
+                fill=outline,
+                width=1,
+            )
+    elif round_corners:
+        radius = rounded_corner_radius(width, height)
+        draw.rounded_rectangle(
+            (x, y, x + width, y + height), radius=radius, outline=outline, width=1
         )
     else:
         draw.rectangle((x, y, x + width, y + height), outline=outline, width=1)

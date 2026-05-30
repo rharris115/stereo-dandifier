@@ -23,11 +23,12 @@ def plain_caption_html(text: str, justification: str = "center") -> str:
 
 @dataclass
 class RenderSettings:
-    layout_template: str = "Holmes (standard)"
+    layout_template: str = "owl_recommended"
     tone_mode: str = "Colour"
     caption_html: str = ""
     caption_position: str = "Both images"
     window_shape: str = "Rectangle"
+    window_round_corners: bool = False
     image_area_percent: int = 100
     crop_x_percent: int = 0
     crop_y_percent: int = 0
