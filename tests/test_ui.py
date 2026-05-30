@@ -18,6 +18,7 @@ from stereo_dandifier.ui import (
     export_dpi_for_images,
     export_page_layouts,
     left_thumbnail_image,
+    resize_crop_box_for_handle,
     window_shape_path,
 )
 from stereo_dandifier.models import ProjectImage, RenderSettings
@@ -243,8 +244,7 @@ def test_window_dialog_exposes_shape_size_and_crop_controls():
     )
 
     dialog.shape_buttons["Arched top"].click()
-    dialog.image_area.setValue(50)
-    dialog._crop_changed_from_view(15, -10)
+    dialog._crop_changed_from_view(50, 15, -10)
 
     assert app is not None
     assert dialog.window_shape == "Arched top"
@@ -288,12 +288,38 @@ def test_window_dialog_updates_position_from_drag_preview():
         preview_image=Image.new("RGB", (100, 100), (120, 130, 140)),
     )
 
-    dialog._crop_changed_from_view(100, -100)
+    dialog._crop_changed_from_view(50, 100, -100)
 
     assert app is not None
     assert dialog.crop_x_percent == 100
     assert dialog.crop_y_percent == -100
     assert dialog.preview._crop_box() == (43, 0, 100, 50)
+
+
+def test_resize_handle_keeps_opposite_side_fixed_and_preserves_aspect():
+    resized = resize_crop_box_for_handle(
+        (100, 100),
+        (25, 25, 75, 75),
+        (1, 1),
+        "top",
+        50,
+        10,
+    )
+
+    assert resized == (18, 10, 82, 75)
+
+
+def test_resize_handle_updates_dialog_window_size_from_crop():
+    app = QApplication.instance() or QApplication([])
+    dialog = WindowDialog(
+        RenderSettings(image_area_percent=50),
+        preview_image=Image.new("RGB", (100, 100), (120, 130, 140)),
+    )
+
+    dialog.preview._emit_crop_box_changed((18, 10, 82, 75))
+
+    assert app is not None
+    assert dialog.image_area_percent == 65
 
 
 def test_source_window_view_greys_area_outside_window():

@@ -234,8 +234,9 @@ class SourceWindowView(QGraphicsView):
         super().__init__()
         self._image = image.convert("RGB")
         self._settings = settings
-        self._crop_changed_callback: Callable[[int, int], None] | None = None
+        self._crop_changed_callback: Callable[[int, int, int], None] | None = None
         self._drag_offset = None
+        self._resize_handle: str | None = None
 
         self._scene = QGraphicsScene(self)
         self._pixmap_item = QGraphicsPixmapItem(QPixmap.fromImage(ImageQt(self._image)))
@@ -249,10 +250,18 @@ class SourceWindowView(QGraphicsView):
         self._window_item = QGraphicsPathItem()
         self._window_item.setBrush(QBrush(Qt.BrushStyle.NoBrush))
         self._window_item.setPen(QPen(QColor(120, 175, 230), 2))
+        self._handles = {
+            name: QGraphicsRectItem() for name in ["top", "right", "bottom", "left"]
+        }
+        for handle in self._handles.values():
+            handle.setBrush(QBrush(QColor(255, 255, 255)))
+            handle.setPen(QPen(QColor(70, 125, 190), 1))
 
         self._scene.addItem(self._pixmap_item)
         self._scene.addItem(self._shade_item)
         self._scene.addItem(self._window_item)
+        for handle in self._handles.values():
+            self._scene.addItem(handle)
         self.setScene(self._scene)
         self.setSceneRect(0, 0, self._image.width, self._image.height)
         self.setRenderHints(
@@ -262,7 +271,7 @@ class SourceWindowView(QGraphicsView):
         self.setMouseTracking(True)
         self._update_overlay()
 
-    def set_crop_changed_callback(self, callback: Callable[[int, int], None]):
+    def set_crop_changed_callback(self, callback: Callable[[int, int, int], None]):
         self._crop_changed_callback = callback
 
     def set_settings(self, settings: RenderSettings):
@@ -272,6 +281,12 @@ class SourceWindowView(QGraphicsView):
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
             scene_pos = self.mapToScene(event.position().toPoint())
+            handle = self._handle_at(scene_pos)
+            if handle is not None:
+                self._resize_handle = handle
+                self.viewport().setCursor(cursor_for_handle(handle, closed=True))
+                event.accept()
+                return
             window_path = self._window_path()
             if window_path.contains(scene_pos):
                 self._drag_offset = scene_pos - self._crop_rect().topLeft()
@@ -282,6 +297,20 @@ class SourceWindowView(QGraphicsView):
 
     def mouseMoveEvent(self, event):
         scene_pos = self.mapToScene(event.position().toPoint())
+        if self._resize_handle is not None:
+            crop_box = resize_crop_box_for_handle(
+                self._image.size,
+                self._crop_box(),
+                source_window_aspect_size(self._settings),
+                self._resize_handle,
+                scene_pos.x(),
+                scene_pos.y(),
+            )
+            self._emit_crop_box_changed(crop_box)
+            self._update_overlay()
+            event.accept()
+            return
+
         if self._drag_offset is not None:
             crop_rect = self._crop_rect()
             left = clamp(
@@ -301,8 +330,16 @@ class SourceWindowView(QGraphicsView):
                 self._image.height - round(crop_rect.height()), top
             )
             if self._crop_changed_callback is not None:
-                self._crop_changed_callback(crop_x, crop_y)
+                self._crop_changed_callback(
+                    self._settings.image_area_percent, crop_x, crop_y
+                )
             self._update_overlay()
+            event.accept()
+            return
+
+        handle = self._handle_at(scene_pos)
+        if handle is not None:
+            self.viewport().setCursor(cursor_for_handle(handle))
             event.accept()
             return
 
@@ -313,11 +350,11 @@ class SourceWindowView(QGraphicsView):
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
-        if (
-            event.button() == Qt.MouseButton.LeftButton
-            and self._drag_offset is not None
+        if event.button() == Qt.MouseButton.LeftButton and (
+            self._drag_offset is not None or self._resize_handle is not None
         ):
             self._drag_offset = None
+            self._resize_handle = None
             self.viewport().setCursor(Qt.CursorShape.OpenHandCursor)
             event.accept()
             return
@@ -352,6 +389,36 @@ class SourceWindowView(QGraphicsView):
         shade_path = image_path.subtracted(window_path)
         self._shade_item.setPath(shade_path)
         self._window_item.setPath(window_path)
+        self._update_handles()
+
+    def _update_handles(self):
+        rect = self._crop_rect()
+        size = handle_size_for_image(self._image.size)
+        half = size / 2
+        centers = {
+            "top": (rect.center().x(), rect.top()),
+            "right": (rect.right(), rect.center().y()),
+            "bottom": (rect.center().x(), rect.bottom()),
+            "left": (rect.left(), rect.center().y()),
+        }
+        for name, (center_x, center_y) in centers.items():
+            self._handles[name].setRect(center_x - half, center_y - half, size, size)
+
+    def _handle_at(self, scene_pos):
+        for name, handle in self._handles.items():
+            if handle.rect().contains(scene_pos):
+                return name
+        return None
+
+    def _emit_crop_box_changed(self, crop_box: tuple[int, int, int, int]):
+        left, top, right, bottom = crop_box
+        crop_w = right - left
+        crop_h = bottom - top
+        image_area = clamp(round(crop_h / self._image.height * 100), 10, 100)
+        crop_x = percent_for_axis_origin(self._image.width - crop_w, left)
+        crop_y = percent_for_axis_origin(self._image.height - crop_h, top)
+        if self._crop_changed_callback is not None:
+            self._crop_changed_callback(image_area, crop_x, crop_y)
 
 
 class StereoDandifierWindow(QMainWindow):
@@ -1147,6 +1214,7 @@ class WindowDialog(QDialog):
         self.setWindowTitle("Edit Window")
         self.resize(620, 620)
         self._base_settings = settings
+        self._image_area_percent = settings.image_area_percent
         self._crop_x_percent = settings.crop_x_percent
         self._crop_y_percent = settings.crop_y_percent
         self._updating_from_view = False
@@ -1185,12 +1253,6 @@ class WindowDialog(QDialog):
         controls_layout.addWidget(self.round_corners)
         self._update_round_corners_state()
 
-        self.image_area = labelled_slider(10, 100, settings.image_area_percent, "%")
-        self.image_area.setFixedWidth(180)
-        self.image_area.valueChanged.connect(self._preview_controls_changed)
-        size_label = QLabel("Window size")
-        controls_layout.addWidget(size_label)
-        controls_layout.addWidget(self.image_area)
         controls_layout.addStretch(1)
         layout.addWidget(controls)
 
@@ -1218,7 +1280,7 @@ class WindowDialog(QDialog):
 
     @property
     def image_area_percent(self) -> int:
-        return self.image_area.value()
+        return self._image_area_percent
 
     @property
     def window_round_corners(self) -> bool:
@@ -1248,8 +1310,11 @@ class WindowDialog(QDialog):
             return
         self.preview.set_settings(self._preview_settings())
 
-    def _crop_changed_from_view(self, crop_x_percent: int, crop_y_percent: int):
+    def _crop_changed_from_view(
+        self, image_area_percent: int, crop_x_percent: int, crop_y_percent: int
+    ):
         self._updating_from_view = True
+        self._image_area_percent = image_area_percent
         self._crop_x_percent = crop_x_percent
         self._crop_y_percent = crop_y_percent
         self._updating_from_view = False
@@ -1435,23 +1500,77 @@ def caption_editor_toolbar(
     return widget
 
 
-def labelled_slider(
-    minimum: int, maximum: int, value: int, suffix: str = ""
-) -> QSlider:
-    slider = QSlider(Qt.Orientation.Horizontal)
-    slider.setRange(minimum, maximum)
-    slider.setValue(value)
-    slider.setToolTip(f"{value}{suffix}")
-    slider.valueChanged.connect(
-        lambda new_value: slider.setToolTip(f"{new_value}{suffix}")
-    )
-    return slider
-
-
 def source_window_aspect_size(settings: RenderSettings) -> tuple[int, int]:
     spec = CARD_FORMATS[settings.layout_template]
     width_mm, height_mm = spec.image_mm
     return max(1, round((width_mm / height_mm) * 1000)), 1000
+
+
+def resize_crop_box_for_handle(
+    image_size: tuple[int, int],
+    crop_box: tuple[int, int, int, int],
+    aspect_size: tuple[int, int],
+    handle: str,
+    scene_x: float,
+    scene_y: float,
+) -> tuple[int, int, int, int]:
+    image_w, image_h = image_size
+    left, top, right, bottom = crop_box
+    aspect = aspect_size[0] / aspect_size[1]
+    min_h = image_h * 0.1
+
+    if handle in {"top", "bottom"}:
+        center_x = (left + right) / 2
+        width_limit_h = (2 * min(center_x, image_w - center_x)) / aspect
+        if handle == "top":
+            max_h = min(bottom, width_limit_h)
+            height = clamp_float(bottom - scene_y, min_h, max_h)
+            top = bottom - height
+        else:
+            max_h = min(image_h - top, width_limit_h)
+            height = clamp_float(scene_y - top, min_h, max_h)
+            bottom = top + height
+        width = height * aspect
+        left = center_x - width / 2
+        right = center_x + width / 2
+    else:
+        center_y = (top + bottom) / 2
+        min_w = min_h * aspect
+        height_limit_w = 2 * min(center_y, image_h - center_y) * aspect
+        if handle == "left":
+            max_w = min(right, height_limit_w)
+            width = clamp_float(right - scene_x, min_w, max_w)
+            left = right - width
+        else:
+            max_w = min(image_w - left, height_limit_w)
+            width = clamp_float(scene_x - left, min_w, max_w)
+            right = left + width
+        height = width / aspect
+        top = center_y - height / 2
+        bottom = center_y + height / 2
+
+    return (
+        round(clamp_float(left, 0, image_w)),
+        round(clamp_float(top, 0, image_h)),
+        round(clamp_float(right, 0, image_w)),
+        round(clamp_float(bottom, 0, image_h)),
+    )
+
+
+def clamp_float(value: float, minimum: float, maximum: float) -> float:
+    if maximum < minimum:
+        return minimum
+    return max(minimum, min(maximum, value))
+
+
+def handle_size_for_image(image_size: tuple[int, int]) -> float:
+    return max(6, min(image_size) * 0.035)
+
+
+def cursor_for_handle(handle: str, closed: bool = False):
+    if handle in {"top", "bottom"}:
+        return Qt.CursorShape.SizeVerCursor
+    return Qt.CursorShape.SizeHorCursor
 
 
 def window_shape_path(
