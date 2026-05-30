@@ -1,19 +1,36 @@
+import os
+
 import pytest
 from PIL import Image
+from PySide6.QtWidgets import QApplication
 
-from stereo_dandifier.formats import CARD_FORMATS, mm_pair_to_px
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+from stereo_dandifier.formats import CARD_FORMATS, mm_pair_to_px, mm_to_px
 from stereo_dandifier.image_ops import (
+    PDF_IMAGE_SAVE_OPTIONS,
     apply_style,
+    caption_html_text,
+    caption_positions,
+    caption_windows,
+    centered_caption_y,
     export_dpi_for_source,
     card_grid,
     native_card_image_dpi,
+    render_caption_html,
     render_print_pages,
     render_card,
     render_print_preview,
     save_pdf,
+    save_pdf_pages,
+    source_metadata_dpi,
     split_stereo_pair,
+    stereo_window_x_positions,
+    trim_transparent,
+    trim_vertical_transparent,
+    visible_image_bottom,
 )
-from stereo_dandifier.models import RenderSettings
+from stereo_dandifier.models import RenderSettings, plain_caption_html
 from stereo_dandifier.print_layout import page_layout_for_name
 
 
@@ -71,6 +88,21 @@ def test_export_dpi_never_drops_below_preview_floor():
     assert export_dpi_for_source(source, settings, minimum_dpi=600) == 600
 
 
+def test_export_dpi_can_use_source_metadata_dpi():
+    source = Image.new("RGB", (1000, 500), (120, 130, 140))
+    source.info["dpi"] = (720, 720)
+    settings = RenderSettings(layout_template="Holmes (standard)")
+
+    assert export_dpi_for_source(source, settings, minimum_dpi=1) == 720
+
+
+def test_source_metadata_dpi_uses_lower_axis_value():
+    source = Image.new("RGB", (1000, 500), (120, 130, 140))
+    source.info["dpi"] = (600.4, 300.2)
+
+    assert source_metadata_dpi(source) == 300
+
+
 def test_render_card_defaults_to_white_without_visible_window_borders():
     source = Image.new("RGB", (800, 300), (120, 130, 140))
     settings = RenderSettings()
@@ -79,6 +111,136 @@ def test_render_card_defaults_to_white_without_visible_window_borders():
     card = render_card(left, right, settings)
 
     assert card.getpixel((5, 5)) == (255, 255, 255)
+
+
+@pytest.mark.parametrize(
+    "caption_position,expected",
+    [
+        ("Left image", [10]),
+        ("Right image", [90]),
+        ("Both images", [10, 90]),
+    ],
+)
+def test_caption_positions_anchor_under_selected_image_windows(
+    caption_position, expected
+):
+    assert (
+        caption_positions(caption_position, left_x=10, right_x=90, image_w=70)
+        == expected
+    )
+
+
+def test_stereo_window_positions_center_pair_on_card():
+    left_x, right_x = stereo_window_x_positions(card_w=2126, image_w=827, spacing=898)
+
+    assert left_x == 200
+    assert right_x == 1098
+    assert left_x == 2126 - (right_x + 827) - 1
+
+
+@pytest.mark.parametrize("name,spec", CARD_FORMATS.items())
+def test_rendered_window_pair_has_balanced_outer_margins(name, spec):
+    card_w, _card_h = mm_pair_to_px(spec["card_mm"])
+    image_w, _image_h = mm_pair_to_px(spec["image_mm"])
+    if spec["gap_mm"] is None:
+        spacing = mm_to_px(spec["center_spacing_mm"])
+    else:
+        spacing = image_w + mm_to_px(spec["gap_mm"])
+
+    left_x, right_x = stereo_window_x_positions(card_w, image_w, spacing)
+    left_margin = left_x
+    right_margin = card_w - (right_x + image_w)
+
+    assert abs(left_margin - right_margin) <= 1
+
+
+def test_caption_windows_start_from_visible_fitted_image_bottom():
+    left = Image.new("RGB", (70, 30))
+    right = Image.new("RGB", (70, 50))
+
+    assert caption_windows(
+        "Both images", 10, 90, left, right, image_y=8, image_h=70
+    ) == [
+        (10, 58),
+        (90, 68),
+    ]
+
+
+def test_visible_image_bottom_uses_centered_fitted_image():
+    assert visible_image_bottom(image_y=8, image_h=70, fitted_h=30) == 58
+
+
+def test_caption_html_text_extracts_plain_text_with_qt_document():
+    assert caption_html_text(plain_caption_html("First wicket")) == "First wicket"
+
+
+def test_caption_render_scales_with_output_resolution():
+    app = QApplication.instance() or QApplication([])
+
+    low = render_caption_html(plain_caption_html("First wicket"), 1000, 300, dpi=72)
+    high = render_caption_html(plain_caption_html("First wicket"), 1000, 300, dpi=600)
+
+    assert app is not None
+    assert alpha_height(high) > alpha_height(low) * 4
+
+
+def test_caption_render_includes_multiple_lines():
+    app = QApplication.instance() or QApplication([])
+    caption = (
+        '<p style="margin:0; font-family:Arial; font-size:14pt;">First wicket</p>'
+        '<p style="margin:0; font-family:Arial; font-size:14pt;">Second innings</p>'
+    )
+
+    rendered = render_caption_html(caption, 827, 142, dpi=300)
+
+    assert app is not None
+    assert len(alpha_line_clusters(rendered)) >= 2
+
+
+def test_trim_transparent_crops_caption_to_visible_content():
+    image = Image.new("RGBA", (20, 20), (0, 0, 0, 0))
+    image.paste((10, 20, 30, 255), (4, 6, 12, 14))
+
+    trimmed = trim_transparent(image)
+
+    assert trimmed.size == (8, 8)
+
+
+def test_trim_vertical_transparent_keeps_caption_width_for_alignment():
+    image = Image.new("RGBA", (20, 20), (0, 0, 0, 0))
+    image.paste((10, 20, 30, 255), (4, 6, 12, 14))
+
+    trimmed = trim_vertical_transparent(image)
+
+    assert trimmed.size == (20, 8)
+
+
+def test_centered_caption_y_bisects_window_bottom_to_card_bottom():
+    y = centered_caption_y(window_bottom=100, card_bottom=160, caption_height=20)
+
+    assert y == 120
+    assert y - 100 == 160 - (y + 20)
+
+
+def test_caption_is_centered_between_visible_image_bottom_and_card_bottom():
+    app = QApplication.instance() or QApplication([])
+    settings = RenderSettings(caption_html=plain_caption_html("First wicket"))
+    left = Image.new("RGB", (800, 300), (120, 130, 140))
+    right = Image.new("RGB", (800, 300), (120, 130, 140))
+
+    card = render_card(left, right, settings, dpi=300)
+    visible_bottom = visible_image_bottom(
+        image_y=95,
+        image_h=827,
+        fitted_h=310,
+    )
+    caption_bbox = non_white_bbox(card, (165, visible_bottom, 992, card.height))
+
+    assert app is not None
+    assert caption_bbox is not None
+    above = caption_bbox[1] - visible_bottom
+    below = card.height - caption_bbox[3]
+    assert abs(above - below) <= 8
 
 
 def test_black_and_white_mode_removes_colour():
@@ -144,3 +306,58 @@ def test_save_pdf_writes_pdf_file(tmp_path):
     save_pdf(page, str(path), dpi=600)
 
     assert path.read_bytes().startswith(b"%PDF")
+
+
+def test_save_pdf_pages_uses_high_quality_image_encoding(monkeypatch):
+    calls = []
+
+    def fake_save(self, file_path, file_format, **kwargs):
+        calls.append((file_path, file_format, kwargs))
+
+    monkeypatch.setattr(Image.Image, "save", fake_save)
+
+    save_pdf_pages([Image.new("RGB", (120, 80), (255, 255, 255))], "card.pdf", dpi=600)
+
+    assert calls[0][1] == "PDF"
+    for key, value in PDF_IMAGE_SAVE_OPTIONS.items():
+        assert calls[0][2][key] == value
+
+
+def alpha_height(image: Image.Image) -> int:
+    bbox = image.getchannel("A").getbbox()
+    if bbox is None:
+        return 0
+    return bbox[3] - bbox[1]
+
+
+def alpha_line_clusters(image: Image.Image) -> list[tuple[int, int]]:
+    alpha = image.getchannel("A")
+    rows = []
+    for y in range(alpha.height):
+        if alpha.crop((0, y, alpha.width, y + 1)).getbbox() is not None:
+            rows.append(y)
+
+    clusters = []
+    for y in rows:
+        if not clusters or y > clusters[-1][1] + 1:
+            clusters.append((y, y))
+        else:
+            clusters[-1] = (clusters[-1][0], y)
+    return clusters
+
+
+def non_white_bbox(
+    image: Image.Image, bounds: tuple[int, int, int, int]
+) -> tuple[int, int, int, int] | None:
+    crop = image.crop(bounds).convert("RGB")
+    pixels = []
+    for y in range(crop.height):
+        for x in range(crop.width):
+            if crop.getpixel((x, y)) != (255, 255, 255):
+                pixels.append((x + bounds[0], y + bounds[1]))
+
+    if not pixels:
+        return None
+    xs = [x for x, _y in pixels]
+    ys = [y for _x, y in pixels]
+    return min(xs), min(ys), max(xs) + 1, max(ys) + 1

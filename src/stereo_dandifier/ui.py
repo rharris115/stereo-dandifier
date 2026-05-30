@@ -4,10 +4,21 @@ from PIL import Image
 from PIL.ImageQt import ImageQt
 
 from PySide6.QtCore import QSize, Qt
-from PySide6.QtGui import QAction, QDragEnterEvent, QDropEvent, QPainter, QPixmap
+from PySide6.QtGui import (
+    QAction,
+    QDragEnterEvent,
+    QDropEvent,
+    QFont,
+    QIcon,
+    QPainter,
+    QPixmap,
+    QTextCharFormat,
+)
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
+    QDialog,
+    QDialogButtonBox,
     QFileDialog,
     QFormLayout,
     QGraphicsPixmapItem,
@@ -15,19 +26,23 @@ from PySide6.QtWidgets import (
     QGraphicsTextItem,
     QGraphicsView,
     QGroupBox,
+    QHBoxLayout,
     QLabel,
-    QLineEdit,
     QListWidget,
     QListWidgetItem,
     QMainWindow,
     QMessageBox,
     QPushButton,
     QSlider,
+    QSpinBox,
     QSplitter,
     QStatusBar,
+    QTextEdit,
     QToolBar,
+    QToolButton,
     QVBoxLayout,
     QWidget,
+    QFontComboBox,
 )
 
 from stereo_dandifier.formats import CARD_FORMATS, format_particulars
@@ -39,10 +54,21 @@ from stereo_dandifier.image_ops import (
     score_comfort,
 )
 from stereo_dandifier.importer import load_project_images
-from stereo_dandifier.models import ProjectImage, RenderSettings
-from stereo_dandifier.print_layout import default_page_layout, page_layout_for_name
+from stereo_dandifier.models import (
+    DEFAULT_CAPTION_FONT_FAMILY,
+    DEFAULT_CAPTION_FONT_SIZE,
+    ProjectImage,
+    RenderSettings,
+)
+from stereo_dandifier.print_layout import (
+    FALLBACK_PREVIEW_DPI,
+    PageLayout,
+    default_page_layout,
+    page_layout_for_name,
+)
 
 SUPPORTED_IMAGE_FILTER = "Images (*.jpg *.jpeg *.png *.dng *.mpo *.tif *.tiff)"
+MIN_CARD_EDITOR_DPI = FALLBACK_PREVIEW_DPI
 
 
 class ZoomableImageView(QGraphicsView):
@@ -141,7 +167,7 @@ class StereoDandifierWindow(QMainWindow):
         self.images: list[ProjectImage] = []
         self.current_index: int | None = None
         self._updating_controls = False
-        self.page_layout = default_page_layout()
+        self.default_export_layout = default_page_layout()
 
         self._build_ui()
         self._apply_app_style()
@@ -193,12 +219,8 @@ class StereoDandifierWindow(QMainWindow):
 
         self.comfort_label = QLabel()
         self.comfort_label.setObjectName("comfortLabel")
-        self.paper_label = QLabel(f"Paper: {self.page_layout.name}")
-        self.paper_label.setObjectName("paperLabel")
-        self.paper_label.setToolTip(self.page_layout.source)
         toolbar.addSeparator()
         toolbar.addWidget(self.comfort_label)
-        toolbar.addWidget(self.paper_label)
 
     def _build_library(self) -> QWidget:
         panel = QWidget()
@@ -237,7 +259,7 @@ class StereoDandifierWindow(QMainWindow):
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(12, 12, 12, 12)
 
-        title = QLabel("Inspector")
+        title = QLabel("Properties")
         title.setObjectName("panelTitle")
         layout.addWidget(title)
 
@@ -254,26 +276,6 @@ class StereoDandifierWindow(QMainWindow):
         image_layout.addRow(auto_rectify)
         layout.addWidget(self.image_group)
 
-        paper_group = QGroupBox("Paper")
-        paper_layout = QFormLayout(paper_group)
-        self.paper_choice = QComboBox()
-        self.paper_choice.addItems(["A4", "Letter"])
-        if self.page_layout.name not in {"A4", "Letter"}:
-            self.paper_choice.addItem(self.page_layout.name)
-        self.paper_choice.setCurrentText(self.page_layout.name)
-        self.paper_choice.currentTextChanged.connect(self._paper_choice_changed)
-        self.paper_size_label = QLabel()
-        self.paper_dpi_label = QLabel()
-        self.paper_source_label = QLabel()
-        self.paper_source_label.setWordWrap(True)
-        self.paper_source_label.setObjectName("hintText")
-        paper_layout.addRow("Size", self.paper_choice)
-        paper_layout.addRow("Dimensions", self.paper_size_label)
-        paper_layout.addRow("DPI", self.paper_dpi_label)
-        paper_layout.addRow(self.paper_source_label)
-        self._update_paper_controls()
-        layout.addWidget(paper_group)
-
         self.card_group = QGroupBox("Card")
         card_layout = QFormLayout(self.card_group)
         self.layout_template = QComboBox()
@@ -285,9 +287,65 @@ class StereoDandifierWindow(QMainWindow):
                 Qt.ItemDataRole.ToolTipRole,
             )
         self.layout_template.currentTextChanged.connect(self._layout_template_changed)
-        self.caption = QLineEdit()
+        self.caption = QTextEdit()
+        self.caption.setAcceptRichText(True)
         self.caption.setPlaceholderText("Caption")
+        self.caption.setObjectName("captionEditor")
+        self.caption.setFixedHeight(104)
         self.caption.textChanged.connect(self._controls_changed)
+        self.caption_position = QComboBox()
+        self.caption_position.addItems(["Both images", "Left image", "Right image"])
+        self.caption_position.currentTextChanged.connect(self._controls_changed)
+        self.caption_font_family = QFontComboBox()
+        self.caption_font_family.setCurrentFont(QFont(DEFAULT_CAPTION_FONT_FAMILY))
+        self.caption_font_family.currentFontChanged.connect(self._caption_font_changed)
+        self.caption_font_size = QSpinBox()
+        self.caption_font_size.setRange(6, 36)
+        self.caption_font_size.setValue(DEFAULT_CAPTION_FONT_SIZE)
+        self.caption_font_size.valueChanged.connect(self._caption_format_changed)
+        self.caption_bold = make_editor_button("B", "Bold", checked=False)
+        self.caption_bold.toggled.connect(self._caption_format_changed)
+        self.caption_italic = make_editor_button("I", "Italic", checked=False)
+        self.caption_italic.toggled.connect(self._caption_format_changed)
+        self.caption_align_left = make_editor_button(
+            "align-left", "Align left", checked=False
+        )
+        self.caption_align_center = make_editor_button(
+            "align-center", "Align center", checked=True
+        )
+        self.caption_align_right = make_editor_button(
+            "align-right", "Align right", checked=False
+        )
+        self.caption_alignment_buttons = {
+            "Left": self.caption_align_left,
+            "Center": self.caption_align_center,
+            "Right": self.caption_align_right,
+        }
+        for justification, button in self.caption_alignment_buttons.items():
+            button.clicked.connect(
+                lambda _checked=False, value=justification: (
+                    self._caption_justification_changed(value)
+                )
+            )
+        self.caption_style_bar = editor_button_bar(
+            [self.caption_bold, self.caption_italic]
+        )
+        self.caption_alignment_bar = editor_button_bar(
+            [
+                self.caption_align_left,
+                self.caption_align_center,
+                self.caption_align_right,
+            ]
+        )
+        self.caption_toolbar = caption_editor_toolbar(
+            self.caption_font_family,
+            self.caption_font_size,
+            self.caption_bold,
+            self.caption_italic,
+            self.caption_align_left,
+            self.caption_align_center,
+            self.caption_align_right,
+        )
         self.layout_info = QLabel()
         self.layout_info.setObjectName("infoBox")
         self.layout_info.setWordWrap(True)
@@ -299,6 +357,8 @@ class StereoDandifierWindow(QMainWindow):
         card_layout.addRow("Layout", self.layout_template)
         card_layout.addRow(self.layout_info)
         card_layout.addRow(self.card_info)
+        card_layout.addRow("Caption placement", self.caption_position)
+        card_layout.addRow(self.caption_toolbar)
         card_layout.addRow("Caption", self.caption)
         layout.addWidget(self.card_group)
 
@@ -359,7 +419,7 @@ class StereoDandifierWindow(QMainWindow):
                 color: #252525;
                 font-size: 13px;
             }
-            QListWidget, QLineEdit, QComboBox {
+            QListWidget, QTextEdit, QComboBox {
                 background: #fffdf8;
                 border: 1px solid #d6cec0;
                 border-radius: 6px;
@@ -410,6 +470,22 @@ class StereoDandifierWindow(QMainWindow):
                 color: #345047;
                 padding: 8px;
             }
+            QTextEdit#captionEditor {
+                background: #fffefb;
+                border: 1px solid #cbbfae;
+                border-radius: 6px;
+                padding: 6px;
+            }
+            QToolButton {
+                background: #fffdf8;
+                border: 1px solid #d6cec0;
+                border-radius: 5px;
+                padding: 4px;
+            }
+            QToolButton:checked {
+                background: #d8e7e0;
+                border-color: #8fb4a6;
+            }
             QGraphicsView#preview {
                 background: #ebe6dc;
                 border: 1px solid #d0c7b8;
@@ -421,13 +497,6 @@ class StereoDandifierWindow(QMainWindow):
                 border-radius: 12px;
                 background: #d8e7e0;
                 color: #17382f;
-                font-weight: 700;
-            }
-            QLabel#paperLabel {
-                padding: 4px 10px;
-                border-radius: 12px;
-                background: #edf2f8;
-                color: #314960;
                 font-weight: 700;
             }
             """)
@@ -580,7 +649,23 @@ class StereoDandifierWindow(QMainWindow):
         self.layout_template.setCurrentText(settings.layout_template)
         self._update_layout_info(settings.layout_template)
         self.tone_mode.setCurrentText(settings.tone_mode)
-        self.caption.setText(settings.caption)
+        if settings.caption_html:
+            self.caption.setHtml(settings.caption_html)
+        else:
+            self.caption.clear()
+        caption_format = self.caption.currentCharFormat()
+        self.caption_position.setCurrentText(settings.caption_position)
+        self.caption_font_family.setCurrentFont(
+            QFont(caption_font_family_from_qt_format(caption_format))
+        )
+        self.caption_font_size.setValue(
+            caption_font_size_from_qt_format(caption_format)
+        )
+        self.caption_bold.setChecked(caption_format.font().bold())
+        self.caption_italic.setChecked(caption_format.font().italic())
+        self._set_caption_alignment_button(
+            caption_justification_from_qt_alignment(self.caption.alignment())
+        )
         self.swap_eyes.setChecked(settings.swap_eyes)
         self.brightness.setValue(settings.brightness)
         self.contrast.setValue(settings.contrast)
@@ -644,20 +729,36 @@ class StereoDandifierWindow(QMainWindow):
         self.layout_info.setText(particulars)
         self.layout_template.setToolTip(particulars)
 
-    def _paper_choice_changed(self, name: str):
+    def _caption_format_changed(self, *_args):
         if self._updating_controls:
             return
-        self.page_layout = page_layout_for_name(name)
-        self._update_paper_controls()
-        self._refresh_previews(reset_view=True)
 
-    def _update_paper_controls(self):
-        width_mm, height_mm = self.page_layout.size_mm
-        self.paper_label.setText(f"Paper: {self.page_layout.name}")
-        self.paper_label.setToolTip(self.page_layout.source)
-        self.paper_size_label.setText(f"{width_mm:g} x {height_mm:g} mm")
-        self.paper_dpi_label.setText(f"{self.page_layout.dpi} dpi")
-        self.paper_source_label.setText(self.page_layout.source)
+        text_format = QTextCharFormat()
+        text_format.setFontFamilies([self.caption_font_family.currentFont().family()])
+        text_format.setFontPointSize(self.caption_font_size.value())
+        text_format.setFontWeight(
+            QFont.Weight.Bold if self.caption_bold.isChecked() else QFont.Weight.Normal
+        )
+        text_format.setFontItalic(self.caption_italic.isChecked())
+        self.caption.mergeCurrentCharFormat(text_format)
+        self._controls_changed()
+
+    def _caption_font_changed(self, font: QFont):
+        if self._updating_controls:
+            return
+        self._caption_format_changed()
+
+    def _caption_justification_changed(self, justification: str):
+        if self._updating_controls:
+            return
+
+        self._set_caption_alignment_button(justification)
+        self.caption.setAlignment(qt_alignment_from_caption(justification))
+        self._controls_changed()
+
+    def _set_caption_alignment_button(self, justification: str):
+        for name, button in self.caption_alignment_buttons.items():
+            button.setChecked(name == justification)
 
     def _controls_changed(self, *_args):
         if self._updating_controls:
@@ -670,7 +771,8 @@ class StereoDandifierWindow(QMainWindow):
         current.settings = RenderSettings(
             layout_template=self.layout_template.currentText(),
             tone_mode=self.tone_mode.currentText(),
-            caption=self.caption.text(),
+            caption_html=caption_html_from_editor(self.caption),
+            caption_position=self.caption_position.currentText(),
             swap_eyes=self.swap_eyes.isChecked(),
             brightness=self.brightness.value(),
             contrast=self.contrast.value(),
@@ -689,7 +791,7 @@ class StereoDandifierWindow(QMainWindow):
             self._set_comfort("No thumbnail selected")
             return
 
-        card = render_project_card(current, dpi=self.page_layout.dpi)
+        card = render_project_card(current, dpi=editor_dpi_for_image(current))
         self.card_view.set_image(card, reset_view=reset_view)
         self._set_comfort(score_comfort(current.source, current.settings))
 
@@ -731,6 +833,12 @@ class StereoDandifierWindow(QMainWindow):
         if not selected_images:
             return
 
+        export_dialog = ExportDialog(self.default_export_layout, selected_images, self)
+        if export_dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        page_layout = export_dialog.selected_layout
+        self.default_export_layout = page_layout
+
         default_name = "stereocards.pdf"
         if len(selected_images) == 1:
             selected = selected_images[0]
@@ -749,23 +857,237 @@ class StereoDandifierWindow(QMainWindow):
         if not file_path.lower().endswith(".pdf"):
             file_path += ".pdf"
 
-        export_dpi = max(
-            export_dpi_for_source(
-                project_image.source,
-                project_image.settings,
-                minimum_dpi=self.page_layout.dpi,
-            )
-            for project_image in selected_images
-        )
+        export_dpi = export_dpi_for_images(selected_images)
         cards = [
             render_project_card(project_image, dpi=export_dpi)
             for project_image in selected_images
         ]
-        pages = render_print_pages(cards, self.page_layout, dpi=export_dpi)
+        pages = render_print_pages(cards, page_layout, dpi=export_dpi)
         save_pdf_pages(pages, file_path, dpi=export_dpi)
-        self.statusBar().showMessage(
-            f"Exported: {Path(file_path).name} at {export_dpi} dpi"
+        self.statusBar().showMessage(f"Exported: {Path(file_path).name}")
+
+
+class ExportDialog(QDialog):
+    def __init__(
+        self,
+        default_layout: PageLayout,
+        project_images: list[ProjectImage],
+        parent: QWidget | None = None,
+    ):
+        super().__init__(parent)
+        self.setWindowTitle("Export PDF")
+        self._layouts = export_page_layouts(default_layout)
+        self._project_images = project_images
+
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+
+        self.paper_choice = QComboBox()
+        self.paper_choice.addItems(self._layouts.keys())
+        self.paper_choice.setCurrentText(default_layout.name)
+        self.paper_choice.currentTextChanged.connect(self._update_details)
+
+        self.paper_size_label = QLabel()
+        self.paper_source_label = QLabel()
+        self.paper_source_label.setWordWrap(True)
+        self.paper_source_label.setObjectName("hintText")
+
+        form.addRow("Paper", self.paper_choice)
+        form.addRow("Dimensions", self.paper_size_label)
+        form.addRow(self.paper_source_label)
+        layout.addLayout(form)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Cancel | QDialogButtonBox.StandardButton.Ok
         )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+        self._update_details(self.paper_choice.currentText())
+
+    @property
+    def selected_layout(self) -> PageLayout:
+        return self._layouts[self.paper_choice.currentText()]
+
+    def _update_details(self, name: str):
+        page_layout = self._layouts[name]
+        width_mm, height_mm = page_layout.size_mm
+        self.paper_size_label.setText(f"{width_mm:g} x {height_mm:g} mm")
+        self.paper_source_label.setText(
+            f"{page_layout.source}\nImages will be rendered from the selected originals "
+            "at the highest useful resolution for the chosen card layout."
+        )
+
+
+def export_page_layouts(default_layout: PageLayout) -> dict[str, PageLayout]:
+    layouts = {
+        "A4": page_layout_for_name("A4"),
+        "Letter": page_layout_for_name("Letter"),
+    }
+    layouts[default_layout.name] = default_layout
+    return layouts
+
+
+def export_dpi_for_images(project_images: list[ProjectImage]) -> int:
+    if not project_images:
+        return 1
+    return max(
+        export_dpi_for_source(
+            project_image.source,
+            project_image.settings,
+            minimum_dpi=1,
+        )
+        for project_image in project_images
+    )
+
+
+def editor_dpi_for_image(project_image: ProjectImage) -> int:
+    return export_dpi_for_source(
+        project_image.source,
+        project_image.settings,
+        minimum_dpi=MIN_CARD_EDITOR_DPI,
+    )
+
+
+def caption_html_from_editor(editor: QTextEdit) -> str:
+    if not editor.toPlainText().strip():
+        return ""
+    return editor.toHtml()
+
+
+def caption_font_size_from_qt_format(text_format: QTextCharFormat) -> int:
+    font = text_format.font()
+    font_size = text_format.fontPointSize()
+    if font_size <= 0:
+        font_size = font.pointSizeF()
+    if font_size <= 0:
+        font_size = DEFAULT_CAPTION_FONT_SIZE
+    return round(font_size)
+
+
+def qt_alignment_from_caption(justification: str):
+    if justification == "Left":
+        return Qt.AlignmentFlag.AlignLeft
+    if justification == "Right":
+        return Qt.AlignmentFlag.AlignRight
+    return Qt.AlignmentFlag.AlignHCenter
+
+
+def caption_justification_from_qt_alignment(alignment) -> str:
+    if alignment & Qt.AlignmentFlag.AlignRight:
+        return "Right"
+    if alignment & Qt.AlignmentFlag.AlignLeft:
+        return "Left"
+    return "Center"
+
+
+def caption_font_family_from_qt_format(text_format: QTextCharFormat) -> str:
+    font = text_format.font()
+    families = text_format.fontFamilies()
+    if families:
+        return families[0]
+
+    families = font.families()
+    if families:
+        return families[0]
+
+    return DEFAULT_CAPTION_FONT_FAMILY
+
+
+def editor_button_bar(buttons: list[QToolButton]) -> QWidget:
+    widget = QWidget()
+    layout = QHBoxLayout(widget)
+    layout.setContentsMargins(0, 0, 0, 0)
+    layout.setSpacing(4)
+    for button in buttons:
+        layout.addWidget(button)
+    layout.addStretch(1)
+    return widget
+
+
+def caption_editor_toolbar(
+    font_family: QFontComboBox,
+    font_size: QSpinBox,
+    bold: QToolButton,
+    italic: QToolButton,
+    align_left: QToolButton,
+    align_center: QToolButton,
+    align_right: QToolButton,
+) -> QWidget:
+    widget = QWidget()
+    layout = QHBoxLayout(widget)
+    layout.setContentsMargins(0, 0, 0, 0)
+    layout.setSpacing(4)
+
+    font_family.setMinimumWidth(112)
+    font_size.setFixedWidth(54)
+
+    for control in [
+        font_family,
+        font_size,
+        bold,
+        italic,
+        align_left,
+        align_center,
+        align_right,
+    ]:
+        layout.addWidget(control)
+    layout.addStretch(1)
+    return widget
+
+
+def make_editor_button(icon_name: str, tooltip: str, checked: bool) -> QToolButton:
+    button = QToolButton()
+    button.setCheckable(True)
+    button.setChecked(checked)
+    button.setIcon(editor_icon(icon_name))
+    button.setIconSize(QSize(18, 18))
+    button.setFixedSize(QSize(30, 28))
+    button.setToolTip(tooltip)
+    return button
+
+
+def editor_icon(name: str) -> QIcon:
+    pixmap = QPixmap(24, 24)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    painter.setPen(Qt.GlobalColor.black)
+
+    if name == "B":
+        font = QFont(DEFAULT_CAPTION_FONT_FAMILY, 13)
+        font.setBold(True)
+        painter.setFont(font)
+        painter.drawText(pixmap.rect(), Qt.AlignmentFlag.AlignCenter, "B")
+    elif name == "I":
+        font = QFont(DEFAULT_CAPTION_FONT_FAMILY, 13)
+        font.setItalic(True)
+        painter.setFont(font)
+        painter.drawText(pixmap.rect(), Qt.AlignmentFlag.AlignCenter, "I")
+    else:
+        draw_alignment_icon(painter, name)
+
+    painter.end()
+    return QIcon(pixmap)
+
+
+def draw_alignment_icon(painter: QPainter, name: str):
+    widths = {
+        "align-left": [16, 11, 15, 9],
+        "align-center": [12, 16, 10, 14],
+        "align-right": [16, 11, 15, 9],
+    }[name]
+    y_values = [6, 10, 14, 18]
+
+    for width, y in zip(widths, y_values):
+        if name == "align-center":
+            x = (24 - width) // 2
+        elif name == "align-right":
+            x = 20 - width
+        else:
+            x = 4
+        painter.drawLine(x, y, x + width, y)
 
 
 def left_thumbnail_image(image: Image.Image) -> Image.Image:

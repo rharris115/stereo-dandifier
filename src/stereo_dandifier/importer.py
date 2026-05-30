@@ -4,7 +4,7 @@ from pathlib import Path
 from PIL import Image, ImageSequence
 
 from stereo_dandifier.exif import read_exif, suggest_caption
-from stereo_dandifier.models import ProjectImage, RenderSettings
+from stereo_dandifier.models import ProjectImage, RenderSettings, plain_caption_html
 
 
 def load_project_images(path: Path) -> list[ProjectImage]:
@@ -25,6 +25,7 @@ def load_pillow_project_images(path: Path) -> list[ProjectImage]:
         for frame_index, frame in enumerate(ImageSequence.Iterator(image)):
             frame.load()
             source = frame.convert("RGB")
+            source.info.update(image.info)
             caption = suggest_caption(path, exif)
             if frame_count > 1:
                 caption = f"{caption} ({frame_index + 1})"
@@ -35,7 +36,7 @@ def load_pillow_project_images(path: Path) -> list[ProjectImage]:
                     frame_index=frame_index,
                     frame_count=frame_count,
                     exif=exif,
-                    settings=RenderSettings(caption=caption),
+                    settings=RenderSettings(caption_html=plain_caption_html(caption)),
                 )
             )
 
@@ -64,7 +65,7 @@ def load_raw_project_images(path: Path) -> list[ProjectImage]:
                     variant_name="Preview",
                     selected_for_export=False,
                     exif=exif,
-                    settings=RenderSettings(caption=caption),
+                    settings=RenderSettings(caption_html=plain_caption_html(caption)),
                 )
             )
 
@@ -78,7 +79,7 @@ def load_raw_project_images(path: Path) -> list[ProjectImage]:
                 variant_name="RAW render",
                 selected_for_export=True,
                 exif=exif,
-                settings=RenderSettings(caption=caption),
+                settings=RenderSettings(caption_html=plain_caption_html(caption)),
             )
         )
 

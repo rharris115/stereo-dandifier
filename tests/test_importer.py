@@ -9,7 +9,7 @@ from stereo_dandifier.importer import load_project_images, load_raw_project_imag
 
 def test_single_frame_file_imports_one_project_image(tmp_path):
     path = tmp_path / "single.png"
-    Image.new("RGB", (8, 4), (255, 0, 0)).save(path)
+    Image.new("RGB", (8, 4), (255, 0, 0)).save(path, dpi=(720, 720))
 
     images = load_project_images(path)
 
@@ -17,6 +17,9 @@ def test_single_frame_file_imports_one_project_image(tmp_path):
     assert images[0].frame_index == 0
     assert images[0].frame_count == 1
     assert images[0].display_name == "single.png"
+    assert "single" in images[0].settings.caption_html
+    assert round(images[0].source.info["dpi"][0]) == 720
+    assert round(images[0].source.info["dpi"][1]) == 720
 
 
 def test_multi_frame_file_imports_selectable_project_images(tmp_path):

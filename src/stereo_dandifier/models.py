@@ -1,14 +1,32 @@
 from dataclasses import dataclass, field
+from html import escape
 from pathlib import Path
 
 from PIL import Image
+
+DEFAULT_CAPTION_FONT_FAMILY = "Arial"
+DEFAULT_CAPTION_FONT_SIZE = 14
+
+
+def plain_caption_html(text: str, justification: str = "center") -> str:
+    if not text:
+        return ""
+    return (
+        "<p "
+        f'align="{escape(justification, quote=True)}" '
+        'style="margin:0; '
+        f"font-family:{DEFAULT_CAPTION_FONT_FAMILY}; "
+        f"font-size:{DEFAULT_CAPTION_FONT_SIZE}pt;"
+        f'">{escape(text)}</p>'
+    )
 
 
 @dataclass
 class RenderSettings:
     layout_template: str = "Holmes (standard)"
     tone_mode: str = "Colour"
-    caption: str = ""
+    caption_html: str = ""
+    caption_position: str = "Both images"
     swap_eyes: bool = True
     brightness: int = 0
     contrast: int = 0

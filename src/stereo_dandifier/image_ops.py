@@ -1,8 +1,16 @@
 from PIL import Image, ImageDraw, ImageEnhance
+from PIL.ImageQt import fromqimage
+from PySide6.QtCore import QRectF, QSizeF
+from PySide6.QtGui import QColor, QImage, QPainter, QTextDocument
 
 from stereo_dandifier.formats import EXPORT_DPI, CARD_FORMATS, mm_pair_to_px, mm_to_px
 from stereo_dandifier.models import ProjectImage, RenderSettings
 from stereo_dandifier.print_layout import PageLayout
+
+PDF_IMAGE_SAVE_OPTIONS = {
+    "quality": 100,
+    "subsampling": 0,
+}
 
 
 def split_stereo_pair(
@@ -66,7 +74,6 @@ def render_card(
     spec = CARD_FORMATS[settings.layout_template]
     card_w, card_h = mm_pair_to_px(spec["card_mm"], dpi=dpi)
     image_w, image_h = mm_pair_to_px(spec["image_mm"], dpi=dpi)
-    side_margin = mm_to_px(spec["side_margin_mm"], dpi=dpi)
     top_margin = mm_to_px(spec["top_margin_mm"], dpi=dpi)
     bottom_area = mm_to_px(spec["bottom_mm"], dpi=dpi)
     if spec["gap_mm"] is None:
@@ -75,26 +82,152 @@ def render_card(
         spacing = image_w + mm_to_px(spec["gap_mm"], dpi=dpi)
 
     card = Image.new("RGB", (card_w, card_h), (255, 255, 255))
-    draw = ImageDraw.Draw(card)
-
     left_fit = fit_to_box(left, image_w, image_h)
     right_fit = fit_to_box(right, image_w, image_h)
 
-    left_x = side_margin
-    right_x = left_x + spacing
+    left_x, right_x = stereo_window_x_positions(card_w, image_w, spacing)
     image_y = top_margin
     paste_window(card, left_fit, left_x, image_y, image_w, image_h)
     paste_window(card, right_fit, right_x, image_y, image_w, image_h)
 
-    if settings.caption:
-        draw.text(
-            (card_w // 2, card_h - bottom_area + mm_to_px(2, dpi=dpi)),
-            settings.caption,
-            fill=(67, 53, 40),
-            anchor="ma",
-        )
+    if caption_html_text(settings.caption_html):
+        for window_x, visible_bottom in caption_windows(
+            settings.caption_position,
+            left_x,
+            right_x,
+            left_fit,
+            right_fit,
+            image_y,
+            image_h,
+        ):
+            caption_h = max(1, card_h - visible_bottom)
+            caption = render_caption_html(
+                settings.caption_html, image_w, caption_h, dpi=dpi
+            )
+            caption_content = trim_vertical_transparent(caption)
+            caption_y = centered_caption_y(
+                window_bottom=visible_bottom,
+                card_bottom=card_h,
+                caption_height=caption_content.height,
+            )
+            card.paste(caption_content, (window_x, caption_y), caption_content)
 
     return card
+
+
+def caption_positions(
+    caption_position: str, left_x: int, right_x: int, image_w: int
+) -> list[int]:
+    if caption_position == "Left image":
+        return [left_x]
+    if caption_position == "Right image":
+        return [right_x]
+    return [left_x, right_x]
+
+
+def stereo_window_x_positions(
+    card_w: int, image_w: int, spacing: int
+) -> tuple[int, int]:
+    pair_w = spacing + image_w
+    left_x = (card_w - pair_w) // 2
+    return left_x, left_x + spacing
+
+
+def caption_windows(
+    caption_position: str,
+    left_x: int,
+    right_x: int,
+    left_fit: Image.Image,
+    right_fit: Image.Image,
+    image_y: int,
+    image_h: int,
+) -> list[tuple[int, int]]:
+    left = (left_x, visible_image_bottom(image_y, image_h, left_fit.height))
+    right = (right_x, visible_image_bottom(image_y, image_h, right_fit.height))
+    if caption_position == "Left image":
+        return [left]
+    if caption_position == "Right image":
+        return [right]
+    return [left, right]
+
+
+def visible_image_bottom(image_y: int, image_h: int, fitted_h: int) -> int:
+    return image_y + ((image_h + fitted_h) // 2)
+
+
+def caption_html_text(caption_html: str) -> str:
+    if not caption_html:
+        return ""
+    document = QTextDocument()
+    document.setHtml(caption_html)
+    return document.toPlainText().strip()
+
+
+def render_caption_html(
+    caption_html: str, width: int, height: int, dpi: int
+) -> Image.Image:
+    scale = dpi / 72
+
+    image = QImage(width, height, QImage.Format.Format_RGBA8888)
+    image.setDotsPerMeterX(round(dpi / 0.0254))
+    image.setDotsPerMeterY(round(dpi / 0.0254))
+    image.fill(QColor(0, 0, 0, 0))
+
+    document = QTextDocument()
+    document.setDocumentMargin(0)
+    document.setHtml(caption_html)
+    logical_width, logical_height, scale = fit_qtext_document_to_box(
+        document, width, height, scale
+    )
+    document.setPageSize(QSizeF(logical_width, logical_height))
+
+    painter = QPainter(image)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    painter.setRenderHint(QPainter.RenderHint.TextAntialiasing)
+    painter.scale(scale, scale)
+    document.drawContents(painter, QRectF(0, 0, logical_width, logical_height))
+    painter.end()
+
+    return fromqimage(image).convert("RGBA")
+
+
+def fit_qtext_document_to_box(
+    document: QTextDocument, width: int, height: int, scale: float
+) -> tuple[float, float, float]:
+    logical_width = max(1, width / scale)
+    logical_height = max(1, height / scale)
+    document.setTextWidth(logical_width)
+
+    content_height = max(1, document.size().height())
+    if content_height * scale <= height:
+        return logical_width, max(logical_height, content_height), scale
+
+    scale = max(0.1, height / content_height)
+    logical_width = max(1, width / scale)
+    logical_height = max(1, height / scale)
+    document.setTextWidth(logical_width)
+    return logical_width, logical_height, scale
+
+
+def trim_transparent(image: Image.Image) -> Image.Image:
+    bbox = image.getchannel("A").getbbox()
+    if bbox is None:
+        return image
+    return image.crop(bbox)
+
+
+def trim_vertical_transparent(image: Image.Image) -> Image.Image:
+    bbox = image.getchannel("A").getbbox()
+    if bbox is None:
+        return image
+    return image.crop((0, bbox[1], image.width, bbox[3]))
+
+
+def centered_caption_y(
+    window_bottom: int, card_bottom: int, caption_height: int
+) -> int:
+    band_height = max(0, card_bottom - window_bottom)
+    return window_bottom + (band_height - caption_height) // 2
 
 
 def native_card_image_dpi(source: Image.Image, settings: RenderSettings) -> int:
@@ -110,7 +243,24 @@ def native_card_image_dpi(source: Image.Image, settings: RenderSettings) -> int:
 def export_dpi_for_source(
     source: Image.Image, settings: RenderSettings, minimum_dpi: int
 ) -> int:
-    return max(minimum_dpi, native_card_image_dpi(source, settings))
+    return max(
+        minimum_dpi,
+        native_card_image_dpi(source, settings),
+        source_metadata_dpi(source) or 0,
+    )
+
+
+def source_metadata_dpi(source: Image.Image) -> int | None:
+    dpi = source.info.get("dpi")
+    if isinstance(dpi, tuple) and dpi:
+        values = [
+            value for value in dpi if isinstance(value, int | float) and value > 0
+        ]
+        if values:
+            return round(min(values))
+    if isinstance(dpi, int | float) and dpi > 0:
+        return round(dpi)
+    return None
 
 
 def render_print_preview(
@@ -195,6 +345,7 @@ def save_pdf_pages(pages: list[Image.Image], file_path: str, dpi: int):
         resolution=dpi,
         save_all=bool(rest),
         append_images=rest,
+        **PDF_IMAGE_SAVE_OPTIONS,
     )
 
 

@@ -29,8 +29,7 @@ def default_page_layout() -> PageLayout:
                 size_mm=page_size_mm(page_size),
                 dpi=dpi,
                 source=(
-                    f"Default printer paper from system: {display_page_name(page_size)}; "
-                    f"preview/render DPI: {dpi}"
+                    f"Default printer paper from system: {display_page_name(page_size)}"
                 ),
                 from_printer=True,
             )
@@ -42,8 +41,8 @@ def default_page_layout() -> PageLayout:
         size_mm=page_size_mm(page_size),
         dpi=FALLBACK_PREVIEW_DPI,
         source=(
-            f"No system paper size found; using locale fallback: {display_page_name(page_size)}; "
-            f"preview/render DPI: {FALLBACK_PREVIEW_DPI}"
+            f"No system paper size found; using locale fallback: "
+            f"{display_page_name(page_size)}"
         ),
         from_printer=False,
     )
@@ -60,10 +59,7 @@ def page_layout_for_name(name: str) -> PageLayout:
         name=display_page_name(page_size),
         size_mm=page_size_mm(page_size),
         dpi=FALLBACK_PREVIEW_DPI,
-        source=(
-            f"Selected PDF paper size: {display_page_name(page_size)}; "
-            f"preview/render DPI: {FALLBACK_PREVIEW_DPI}"
-        ),
+        source=f"Selected PDF paper size: {display_page_name(page_size)}",
         from_printer=False,
     )
 
