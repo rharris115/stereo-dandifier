@@ -3,11 +3,15 @@ from pathlib import Path
 
 from PIL import Image, ImageSequence
 
+from stereo_dandifier.card_json import load_card_json
 from stereo_dandifier.exif import read_exif, suggest_caption
 from stereo_dandifier.models import ProjectImage, RenderSettings, plain_caption_html
 
 
 def load_project_images(path: Path) -> list[ProjectImage]:
+    if path.suffix.lower() == ".json":
+        return [load_card_json(path)]
+
     if path.suffix.lower() == ".dng":
         raw_images = load_raw_project_images(path)
         if raw_images:
@@ -63,7 +67,6 @@ def load_raw_project_images(path: Path) -> list[ProjectImage]:
                     frame_index=0,
                     frame_count=2,
                     variant_name="Preview",
-                    selected_for_export=False,
                     exif=exif,
                     settings=RenderSettings(caption_html=plain_caption_html(caption)),
                 )
@@ -77,7 +80,6 @@ def load_raw_project_images(path: Path) -> list[ProjectImage]:
                 frame_index=len(variants),
                 frame_count=len(variants) + 1,
                 variant_name="RAW render",
-                selected_for_export=True,
                 exif=exif,
                 settings=RenderSettings(caption_html=plain_caption_html(caption)),
             )

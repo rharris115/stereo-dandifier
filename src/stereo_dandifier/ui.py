@@ -57,7 +57,9 @@ from PySide6.QtWidgets import (
 )
 
 from stereo_dandifier.formats import CARD_FORMATS, format_particulars
+from stereo_dandifier.card_json import save_card_json
 from stereo_dandifier.image_ops import (
+    auto_improve_stereo_pair,
     apply_style,
     caption_bounds_for_project,
     export_dpi_for_source,
@@ -73,10 +75,14 @@ from stereo_dandifier.image_ops import (
 )
 from stereo_dandifier.importer import load_project_images
 from stereo_dandifier.models import (
+    CaptionPosition,
+    CardLayoutName,
     DEFAULT_CAPTION_FONT_FAMILY,
     DEFAULT_CAPTION_FONT_SIZE,
     ProjectImage,
     RenderSettings,
+    ToneMode,
+    WindowShape,
 )
 from stereo_dandifier.print_layout import (
     FALLBACK_PREVIEW_DPI,
@@ -184,11 +190,6 @@ class ZoomableImageView(QGraphicsView):
         self._hotspot_item.setVisible(False)
         self._zoom = 0
         self.resetTransform()
-
-    def set_hotspots(self, bounds: list[tuple[int, int, int, int]], callback):
-        self.set_hotspot_actions(
-            [(bound, callback, self._default_tooltip) for bound in bounds]
-        )
 
     def set_hotspot_actions(
         self,
@@ -481,6 +482,7 @@ class StereoDandifierWindow(QMainWindow):
         self.images: list[ProjectImage] = []
         self.current_index: int | None = None
         self._updating_controls = False
+        self._cross_eyed_preview = False
         self.default_export_layout = default_page_layout()
 
         self._build_ui()
@@ -514,10 +516,15 @@ class StereoDandifierWindow(QMainWindow):
         self.export_action.setEnabled(False)
         self.export_action.triggered.connect(self.export_card)
 
+        self.save_card_action = QAction("Save Current Card Data", self)
+        self.save_card_action.setEnabled(False)
+        self.save_card_action.triggered.connect(self.save_current_card_data)
+
         quit_action = QAction("Quit", self)
         quit_action.triggered.connect(self.close)
 
         file_menu.addAction(self.import_action)
+        file_menu.addAction(self.save_card_action)
         file_menu.addAction(self.export_action)
         file_menu.addSeparator()
         file_menu.addAction(quit_action)
@@ -529,6 +536,7 @@ class StereoDandifierWindow(QMainWindow):
         self.addToolBar(toolbar)
 
         toolbar.addAction(self.export_action)
+        toolbar.addAction(self.save_card_action)
 
     def _build_status_bar(self):
         status_bar = QStatusBar()
@@ -580,6 +588,18 @@ class StereoDandifierWindow(QMainWindow):
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(14, 12, 14, 12)
 
+        preview_controls = QHBoxLayout()
+        preview_controls.addStretch(1)
+        self.cross_eyed_preview = QToolButton()
+        self.cross_eyed_preview.setText("Cross-eyed preview")
+        self.cross_eyed_preview.setCheckable(True)
+        self.cross_eyed_preview.setToolTip(
+            "Swap the preview eyes only. Exported and saved cards stay uncrossed."
+        )
+        self.cross_eyed_preview.toggled.connect(self._cross_eyed_preview_changed)
+        preview_controls.addWidget(self.cross_eyed_preview)
+        layout.addLayout(preview_controls)
+
         self.card_view = ZoomableImageView("Import an SBS stereo image to begin")
         layout.addWidget(self.card_view)
 
@@ -596,9 +616,12 @@ class StereoDandifierWindow(QMainWindow):
 
         self.image_group = QGroupBox("Image")
         image_layout = QFormLayout(self.image_group)
-        self.swap_eyes = QCheckBox("Swap eyes for cross-eyed preview")
-        self.swap_eyes.toggled.connect(self._controls_changed)
-        image_layout.addRow(self.swap_eyes)
+        self.auto_improve = QPushButton("Auto Improve Photo")
+        self.auto_improve.setToolTip(
+            "Apply one shared, stereo-safe levels adjustment to both eyes."
+        )
+        self.auto_improve.clicked.connect(self.auto_improve_current_image)
+        image_layout.addRow(self.auto_improve)
         self.auto_rectify = QPushButton("Stereo Rectify")
         self.auto_rectify.setToolTip("Detect and correct vertical eye alignment.")
         self.auto_rectify.clicked.connect(self.auto_rectify_current_image)
@@ -608,7 +631,7 @@ class StereoDandifierWindow(QMainWindow):
         self.card_group = QGroupBox("Card")
         card_layout = QFormLayout(self.card_group)
         self.layout_template = QComboBox()
-        self.layout_template.addItems(CARD_FORMATS.keys())
+        self.layout_template.addItems([layout.value for layout in CARD_FORMATS])
         for index, name in enumerate(CARD_FORMATS):
             self.layout_template.setItemData(
                 index,
@@ -622,7 +645,7 @@ class StereoDandifierWindow(QMainWindow):
         self.card_info = QLabel("No thumbnail selected")
         self.card_info.setObjectName("infoBox")
         self.card_info.setWordWrap(True)
-        self._update_layout_info(self.layout_template.currentText())
+        self._update_layout_info(CardLayoutName(self.layout_template.currentText()))
         self._update_card_info()
         card_layout.addRow("Layout", self.layout_template)
         card_layout.addRow(self.layout_info)
@@ -632,7 +655,7 @@ class StereoDandifierWindow(QMainWindow):
         self.style_group = QGroupBox("Style")
         style_layout = QFormLayout(self.style_group)
         self.tone_mode = QComboBox()
-        self.tone_mode.addItems(["Colour", "Black and White", "Sepia"])
+        self.tone_mode.addItems([mode.value for mode in ToneMode])
         self.tone_mode.currentTextChanged.connect(self._tone_mode_changed)
         self.brightness = self._make_slider(-100, 300, 0, affects_comfort=False)
         self.contrast = self._make_slider(-100, 100, 0, affects_comfort=False)
@@ -645,7 +668,7 @@ class StereoDandifierWindow(QMainWindow):
         style_layout.insertRow(0, "Mode", self.tone_mode)
         style_layout.insertRow(1, "Brightness", self.brightness)
         style_layout.insertRow(2, "Contrast", self.contrast)
-        self._update_tone_controls(self.tone_mode.currentText())
+        self._update_tone_controls(ToneMode(self.tone_mode.currentText()))
         layout.addWidget(self.style_group)
         self._set_card_controls_enabled(False)
 
@@ -885,6 +908,7 @@ class StereoDandifierWindow(QMainWindow):
         if current is None:
             self.current_index = None
             self.remove_thumbnail_button.setEnabled(False)
+            self.save_card_action.setEnabled(False)
             self._load_controls()
             self._refresh_previews(reset_view=True)
             return
@@ -893,11 +917,13 @@ class StereoDandifierWindow(QMainWindow):
         if image_index is None:
             self.current_index = None
             self.remove_thumbnail_button.setEnabled(False)
+            self.save_card_action.setEnabled(False)
             self._load_controls()
             self._refresh_previews(reset_view=True)
             return
 
         self.remove_thumbnail_button.setEnabled(True)
+        self.save_card_action.setEnabled(True)
         self._select_image(image_index)
 
     def _select_image(self, index: int):
@@ -933,6 +959,7 @@ class StereoDandifierWindow(QMainWindow):
         if selected is None:
             self.current_index = None
             self.remove_thumbnail_button.setEnabled(False)
+            self.save_card_action.setEnabled(False)
             self._load_controls()
             self._refresh_previews(reset_view=True)
         else:
@@ -997,10 +1024,10 @@ class StereoDandifierWindow(QMainWindow):
         settings = current.settings
         self._set_card_controls_enabled(True)
         self._updating_controls = True
-        self.layout_template.setCurrentText(settings.layout_template)
+        self.layout_template.setCurrentText(settings.layout_template.value)
         self._update_layout_info(settings.layout_template)
-        self.tone_mode.setCurrentText(settings.tone_mode)
-        self.swap_eyes.setChecked(settings.swap_eyes)
+        self.tone_mode.setCurrentText(settings.tone_mode.value)
+        self.cross_eyed_preview.setChecked(self._cross_eyed_preview)
         self.brightness.setValue(settings.brightness)
         self.contrast.setValue(settings.contrast)
         self.saturation.setValue(settings.saturation)
@@ -1010,23 +1037,24 @@ class StereoDandifierWindow(QMainWindow):
         self._update_card_info()
 
     def _tone_mode_changed(self, mode: str):
+        tone_mode = ToneMode(mode)
         if self._updating_controls:
-            self._update_tone_controls(mode)
+            self._update_tone_controls(tone_mode)
             return
         defaults = {
-            "Colour": {
+            ToneMode.COLOUR: {
                 "brightness": 0,
                 "contrast": 4,
                 "saturation": 8,
                 "sepia_strength": 45,
             },
-            "Black and White": {
+            ToneMode.BLACK_AND_WHITE: {
                 "brightness": 0,
                 "contrast": 16,
                 "saturation": 0,
                 "sepia_strength": 45,
             },
-            "Sepia": {
+            ToneMode.SEPIA: {
                 "brightness": 2,
                 "contrast": 8,
                 "saturation": 0,
@@ -1034,30 +1062,31 @@ class StereoDandifierWindow(QMainWindow):
             },
         }
         self._updating_controls = True
-        self.brightness.setValue(defaults[mode]["brightness"])
-        self.contrast.setValue(defaults[mode]["contrast"])
-        self.saturation.setValue(defaults[mode]["saturation"])
-        self.sepia_strength.setValue(defaults[mode]["sepia_strength"])
-        self._update_tone_controls(mode)
+        self.brightness.setValue(defaults[tone_mode]["brightness"])
+        self.contrast.setValue(defaults[tone_mode]["contrast"])
+        self.saturation.setValue(defaults[tone_mode]["saturation"])
+        self.sepia_strength.setValue(defaults[tone_mode]["sepia_strength"])
+        self._update_tone_controls(tone_mode)
         self._updating_controls = False
         self._controls_changed(recalculate_comfort=False)
 
-    def _update_tone_controls(self, mode: str):
-        colour_mode = mode == "Colour"
-        sepia_mode = mode == "Sepia"
+    def _update_tone_controls(self, mode: ToneMode):
+        colour_mode = mode == ToneMode.COLOUR
+        sepia_mode = mode == ToneMode.SEPIA
         self.saturation_label.setVisible(colour_mode)
         self.saturation.setVisible(colour_mode)
         self.sepia_strength_label.setVisible(sepia_mode)
         self.sepia_strength.setVisible(sepia_mode)
 
     def _layout_template_changed(self, name: str):
+        layout_name = CardLayoutName(name)
         if self._updating_controls:
-            self._update_layout_info(name)
+            self._update_layout_info(layout_name)
             return
-        self._update_layout_info(name)
+        self._update_layout_info(layout_name)
         self._controls_changed()
 
-    def _update_layout_info(self, name: str):
+    def _update_layout_info(self, name: CardLayoutName):
         particulars = format_particulars(name)
         self.layout_info.setText(particulars)
         self.layout_template.setToolTip(particulars)
@@ -1071,8 +1100,8 @@ class StereoDandifierWindow(QMainWindow):
             return
 
         current.settings = RenderSettings(
-            layout_template=self.layout_template.currentText(),
-            tone_mode=self.tone_mode.currentText(),
+            layout_template=CardLayoutName(self.layout_template.currentText()),
+            tone_mode=ToneMode(self.tone_mode.currentText()),
             caption_html=current.settings.caption_html,
             caption_position=current.settings.caption_position,
             window_shape=current.settings.window_shape,
@@ -1080,15 +1109,32 @@ class StereoDandifierWindow(QMainWindow):
             image_area_percent=current.settings.image_area_percent,
             crop_x_percent=current.settings.crop_x_percent,
             crop_y_percent=current.settings.crop_y_percent,
-            swap_eyes=self.swap_eyes.isChecked(),
             brightness=self.brightness.value(),
             contrast=self.contrast.value(),
             saturation=self.saturation.value(),
             sepia_strength=self.sepia_strength.value(),
-            convergence=current.settings.convergence,
             right_eye_transform=current.settings.right_eye_transform,
         )
         self._refresh_previews(recalculate_comfort=recalculate_comfort)
+
+    def _cross_eyed_preview_changed(self, checked: bool):
+        self._cross_eyed_preview = checked
+        self._refresh_previews(recalculate_comfort=False)
+
+    def auto_improve_current_image(self):
+        current = self.current_image
+        if current is None:
+            return
+
+        left, right = split_stereo_pair(current.source, RenderSettings())
+        adjusted_left, adjusted_right = auto_improve_stereo_pair(left, right)
+
+        improved = Image.new("RGB", current.source.size)
+        improved.paste(adjusted_left, (0, 0))
+        improved.paste(adjusted_right, (adjusted_left.width, 0))
+        current.source = improved
+        self._refresh_previews(reset_view=True)
+        self.statusBar().showMessage("Applied stereo-safe photo improvement")
 
     def auto_rectify_current_image(self):
         current = self.current_image
@@ -1110,9 +1156,7 @@ class StereoDandifierWindow(QMainWindow):
         QCoreApplication.processEvents()
 
         try:
-            right_eye_transform = suggested_right_eye_transform(
-                current.source, current.settings
-            )
+            right_eye_transform = suggested_right_eye_transform(current.source)
         finally:
             progress.close()
 
@@ -1135,13 +1179,16 @@ class StereoDandifierWindow(QMainWindow):
         self.export_action.setEnabled(bool(self.selected_project_images()))
         self._update_card_info()
         current = self.current_image
+        self.save_card_action.setEnabled(current is not None)
         if current is None:
             self.card_view.set_placeholder("Select a thumbnail to edit its card")
             self._set_comfort("No thumbnail selected")
             return
 
         preview_dpi = editor_dpi_for_image(current)
-        card = render_project_card(current, dpi=preview_dpi)
+        card = render_project_card(
+            current, dpi=preview_dpi, cross_eyed=self._cross_eyed_preview
+        )
         self.card_view.set_image(card, reset_view=reset_view)
         self.card_view.set_hotspot_actions(
             [
@@ -1231,6 +1278,32 @@ class StereoDandifierWindow(QMainWindow):
         self.card_view.style().unpolish(self.card_view)
         self.card_view.style().polish(self.card_view)
         self.card_view.update()
+
+    def save_current_card_data(self):
+        current = self.current_image
+        if current is None:
+            return
+
+        default_name = current.path.with_suffix("").name
+        if current.frame_count > 1:
+            default_name = f"{default_name}-frame-{current.frame_index + 1}"
+        if current.variant_name:
+            default_name = f"{default_name}-{safe_filename_part(current.variant_name)}"
+        default_name = f"{default_name}-stereocard.json"
+
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save Current Card Data",
+            str(current.path.with_name(default_name)),
+            "JSON document (*.json)",
+        )
+        if not file_path:
+            return
+        if not file_path.lower().endswith(".json"):
+            file_path += ".json"
+
+        save_card_json(current, Path(file_path))
+        self.statusBar().showMessage(f"Saved card data: {Path(file_path).name}")
 
     def export_card(self):
         selected_images = self.selected_project_images()
@@ -1353,14 +1426,14 @@ class CaptionDialog(QDialog):
         return caption_html_from_editor(self.editor)
 
     @property
-    def caption_position(self) -> str:
+    def caption_position(self) -> CaptionPosition:
         left = self.caption_under_left.isChecked()
         right = self.caption_under_right.isChecked()
         if left and not right:
-            return "Left image"
+            return CaptionPosition.LEFT_IMAGE
         if right and not left:
-            return "Right image"
-        return "Both images"
+            return CaptionPosition.RIGHT_IMAGE
+        return CaptionPosition.BOTH_IMAGES
 
     def _caption_format_changed(self, *_args):
         if self._updating_toolbar:
@@ -1403,9 +1476,13 @@ class CaptionDialog(QDialog):
             caption_justification_from_qt_alignment(self.editor.alignment())
         )
 
-    def _set_caption_position_checks(self, caption_position: str):
-        self.caption_under_left.setChecked(caption_position != "Right image")
-        self.caption_under_right.setChecked(caption_position != "Left image")
+    def _set_caption_position_checks(self, caption_position: CaptionPosition):
+        self.caption_under_left.setChecked(
+            caption_position != CaptionPosition.RIGHT_IMAGE
+        )
+        self.caption_under_right.setChecked(
+            caption_position != CaptionPosition.LEFT_IMAGE
+        )
 
     def _caption_position_changed(self):
         if self.caption_under_left.isChecked() or self.caption_under_right.isChecked():
@@ -1457,7 +1534,7 @@ class WindowDialog(QDialog):
         window_shapes = window_shapes_for_layout(settings)
         selected_shape = effective_window_shape(settings)
         if selected_shape not in window_shapes:
-            selected_shape = "Rectangle"
+            selected_shape = WindowShape.RECTANGLE
         for shape in window_shapes:
             button = make_shape_button(shape, checked=shape == selected_shape)
             button.clicked.connect(self._preview_controls_changed)
@@ -1490,11 +1567,11 @@ class WindowDialog(QDialog):
         layout.addWidget(buttons)
 
     @property
-    def window_shape(self) -> str:
+    def window_shape(self) -> WindowShape:
         for shape, button in self.shape_buttons.items():
             if button.isChecked():
                 return shape
-        return "Rectangle"
+        return WindowShape.RECTANGLE
 
     @property
     def image_area_percent(self) -> int:
@@ -1503,7 +1580,7 @@ class WindowDialog(QDialog):
     @property
     def window_round_corners(self) -> bool:
         return (
-            self.window_shape not in {"Circle", "Oval"}
+            self.window_shape not in {WindowShape.CIRCLE, WindowShape.OVAL}
             and self.round_corners.isChecked()
         )
 
@@ -1543,7 +1620,7 @@ class WindowDialog(QDialog):
             self.preview.set_settings(self._preview_settings())
 
     def _update_round_corners_state(self):
-        has_no_corners = self.window_shape in {"Circle", "Oval"}
+        has_no_corners = self.window_shape in {WindowShape.CIRCLE, WindowShape.OVAL}
         if has_no_corners and self.round_corners.isChecked():
             self.round_corners.blockSignals(True)
             self.round_corners.setChecked(False)
@@ -1646,6 +1723,12 @@ def comfort_state_for_text(text: str) -> str:
     return "neutral"
 
 
+def safe_filename_part(value: str) -> str:
+    safe = "".join(character if character.isalnum() else "-" for character in value)
+    safe = "-".join(part for part in safe.split("-") if part)
+    return safe.lower() or "card"
+
+
 def caption_html_from_editor(editor: QTextEdit) -> str:
     if not editor.toPlainText().strip():
         return ""
@@ -1689,17 +1772,6 @@ def caption_font_family_from_qt_format(text_format: QTextCharFormat) -> str:
         return families[0]
 
     return DEFAULT_CAPTION_FONT_FAMILY
-
-
-def editor_button_bar(buttons: list[QToolButton]) -> QWidget:
-    widget = QWidget()
-    layout = QHBoxLayout(widget)
-    layout.setContentsMargins(0, 0, 0, 0)
-    layout.setSpacing(4)
-    for button in buttons:
-        layout.addWidget(button)
-    layout.addStretch(1)
-    return widget
 
 
 def caption_editor_toolbar(
@@ -1822,12 +1894,12 @@ def cursor_for_handle(handle: str, closed: bool = False):
 
 
 def window_shape_path(
-    rect: QRectF, shape: str, round_corners: bool = False
+    rect: QRectF, shape: WindowShape, round_corners: bool = False
 ) -> QPainterPath:
     path = QPainterPath()
-    if shape == "Oval":
+    if shape == WindowShape.OVAL:
         path.addEllipse(rect)
-    elif shape == "Circle":
+    elif shape == WindowShape.CIRCLE:
         diameter = min(rect.width(), rect.height())
         circle = QRectF(
             rect.x() + (rect.width() - diameter) / 2,
@@ -1836,7 +1908,7 @@ def window_shape_path(
             diameter,
         )
         path.addEllipse(circle)
-    elif shape == "Arched top":
+    elif shape == WindowShape.ARCHED_TOP:
         arch_height = arched_top_depth(rect.width(), rect.height())
         radius = (
             rounded_corner_radius(rect.width(), rect.height()) if round_corners else 0
@@ -1897,25 +1969,29 @@ def percent_for_axis_origin(max_offset: int, origin: int) -> int:
     return round((clamp(origin, 0, max_offset) / max_offset) * 200 - 100)
 
 
-def window_shapes_for_layout(settings: RenderSettings) -> tuple[str, str, str]:
+def window_shapes_for_layout(
+    settings: RenderSettings,
+) -> tuple[WindowShape, WindowShape, WindowShape]:
     spec = CARD_FORMATS[settings.layout_template]
     image_w, image_h = spec.image_mm
-    round_shape = "Oval" if abs(image_w - image_h) > 0.01 else "Circle"
-    return ("Rectangle", round_shape, "Arched top")
+    round_shape = (
+        WindowShape.OVAL if abs(image_w - image_h) > 0.01 else WindowShape.CIRCLE
+    )
+    return (WindowShape.RECTANGLE, round_shape, WindowShape.ARCHED_TOP)
 
 
-def make_shape_button(shape: str, checked: bool) -> QToolButton:
+def make_shape_button(shape: WindowShape, checked: bool) -> QToolButton:
     button = QToolButton()
     button.setCheckable(True)
     button.setChecked(checked)
     button.setIcon(shape_icon(shape))
     button.setIconSize(QSize(26, 26))
     button.setFixedSize(QSize(36, 34))
-    button.setToolTip(shape)
+    button.setToolTip(shape.value)
     return button
 
 
-def shape_icon(shape: str) -> QIcon:
+def shape_icon(shape: WindowShape) -> QIcon:
     pixmap = QPixmap(32, 32)
     pixmap.fill(Qt.GlobalColor.transparent)
     painter = QPainter(pixmap)

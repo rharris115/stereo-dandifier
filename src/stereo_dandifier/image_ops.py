@@ -1,4 +1,4 @@
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 
 try:
     import cv2
@@ -15,7 +15,13 @@ from PySide6.QtCore import QRectF, QSizeF
 from PySide6.QtGui import QColor, QImage, QPainter, QTextDocument
 
 from stereo_dandifier.formats import EXPORT_DPI, CARD_FORMATS, mm_pair_to_px, mm_to_px
-from stereo_dandifier.models import ProjectImage, RenderSettings
+from stereo_dandifier.models import (
+    CaptionPosition,
+    ProjectImage,
+    RenderSettings,
+    ToneMode,
+    WindowShape,
+)
 from stereo_dandifier.print_layout import PageLayout
 
 PDF_IMAGE_SAVE_OPTIONS = {
@@ -45,21 +51,7 @@ def split_stereo_pair(
     if settings.right_eye_transform:
         right = apply_rectification_transform(right, settings.right_eye_transform)
 
-    if settings.convergence:
-        left = horizontal_shift(left, settings.convergence)
-        right = horizontal_shift(right, -settings.convergence)
-
-    if settings.swap_eyes:
-        return right, left
     return left, right
-
-
-def horizontal_shift(image: Image.Image, pixels: int) -> Image.Image:
-    if pixels == 0:
-        return image
-    shifted = Image.new("RGB", image.size, (245, 241, 232))
-    shifted.paste(image, (pixels, 0))
-    return shifted
 
 
 def apply_rectification_transform(
@@ -118,10 +110,10 @@ def apply_style(image: Image.Image, settings: RenderSettings) -> Image.Image:
         factor = 1 + (settings.contrast / 100)
         styled = ImageEnhance.Contrast(styled).enhance(factor)
 
-    if settings.tone_mode == "Black and White":
+    if settings.tone_mode == ToneMode.BLACK_AND_WHITE:
         return styled.convert("L").convert("RGB")
 
-    if settings.tone_mode == "Sepia":
+    if settings.tone_mode == ToneMode.SEPIA:
         grey = styled.convert("L").convert("RGB")
         sepia = Image.new("RGB", styled.size, (118, 88, 55))
         toned = Image.blend(grey, sepia, 0.36)
@@ -132,6 +124,50 @@ def apply_style(image: Image.Image, settings: RenderSettings) -> Image.Image:
         styled = ImageEnhance.Color(styled).enhance(factor)
 
     return styled
+
+
+def compute_shared_levels(
+    left: Image.Image,
+    right: Image.Image,
+    cutoff: float = 0.005,
+) -> tuple[np.ndarray, np.ndarray]:
+    cutoff = max(0.0, min(0.49, cutoff))
+    left_pixels = np.asarray(left.convert("RGB"), dtype=np.float32).reshape(-1, 3)
+    right_pixels = np.asarray(right.convert("RGB"), dtype=np.float32).reshape(-1, 3)
+    combined = np.concatenate((left_pixels, right_pixels), axis=0)
+
+    low, high = np.quantile(
+        combined,
+        (cutoff, 1.0 - cutoff),
+        axis=0,
+    )
+    return low.astype(np.float32), high.astype(np.float32)
+
+
+def apply_shared_levels(
+    image: Image.Image,
+    low: np.ndarray,
+    high: np.ndarray,
+) -> Image.Image:
+    source = np.asarray(image.convert("RGB"), dtype=np.float32)
+    low = np.asarray(low, dtype=np.float32).reshape(1, 1, 3)
+    high = np.asarray(high, dtype=np.float32).reshape(1, 1, 3)
+    scale = high - low
+    valid_channels = scale > 1e-6
+    safe_scale = np.where(valid_channels, scale, 1.0)
+
+    adjusted = np.where(valid_channels, (source - low) * (255.0 / safe_scale), source)
+    adjusted = np.clip(adjusted, 0, 255).astype(np.uint8)
+    return Image.fromarray(adjusted, mode="RGB")
+
+
+def auto_improve_stereo_pair(
+    left: Image.Image,
+    right: Image.Image,
+    cutoff: float = 0.005,
+) -> tuple[Image.Image, Image.Image]:
+    low, high = compute_shared_levels(left, right, cutoff=cutoff)
+    return apply_shared_levels(left, low, high), apply_shared_levels(right, low, high)
 
 
 def render_card(
@@ -207,16 +243,6 @@ def card_window_geometry(
     return left_x, right_x, top_margin, image_w, image_h, spacing
 
 
-def caption_positions(
-    caption_position: str, left_x: int, right_x: int, image_w: int
-) -> list[int]:
-    if caption_position == "Left image":
-        return [left_x]
-    if caption_position == "Right image":
-        return [right_x]
-    return [left_x, right_x]
-
-
 def stereo_window_x_positions(
     card_w: int, image_w: int, spacing: int
 ) -> tuple[int, int]:
@@ -226,7 +252,7 @@ def stereo_window_x_positions(
 
 
 def caption_windows(
-    caption_position: str,
+    caption_position: CaptionPosition,
     left_x: int,
     right_x: int,
     left_fit: Image.Image,
@@ -236,9 +262,9 @@ def caption_windows(
 ) -> list[tuple[int, int]]:
     left = (left_x, visible_image_bottom(image_y, image_h, left_fit.height))
     right = (right_x, visible_image_bottom(image_y, image_h, right_fit.height))
-    if caption_position == "Left image":
+    if caption_position == CaptionPosition.LEFT_IMAGE:
         return [left]
-    if caption_position == "Right image":
+    if caption_position == CaptionPosition.RIGHT_IMAGE:
         return [right]
     return [left, right]
 
@@ -336,13 +362,6 @@ def fit_qtext_document_to_box(
     return logical_width, logical_height, scale
 
 
-def trim_transparent(image: Image.Image) -> Image.Image:
-    bbox = image.getchannel("A").getbbox()
-    if bbox is None:
-        return image
-    return image.crop(bbox)
-
-
 def trim_vertical_transparent(image: Image.Image) -> Image.Image:
     bbox = image.getchannel("A").getbbox()
     if bbox is None:
@@ -388,12 +407,6 @@ def source_metadata_dpi(source: Image.Image) -> int | None:
     if isinstance(dpi, int | float) and dpi > 0:
         return round(dpi)
     return None
-
-
-def render_print_preview(
-    card: Image.Image, page_layout: PageLayout, dpi: int = EXPORT_DPI
-) -> Image.Image:
-    return render_print_page([card], page_layout, dpi=dpi)
 
 
 def render_print_pages(
@@ -457,10 +470,6 @@ def card_grid(
     return columns, rows
 
 
-def save_pdf(page: Image.Image, file_path: str, dpi: int):
-    save_pdf_pages([page], file_path, dpi=dpi)
-
-
 def save_pdf_pages(pages: list[Image.Image], file_path: str, dpi: int):
     if not pages:
         raise ValueError("Cannot save a PDF without at least one page")
@@ -476,8 +485,12 @@ def save_pdf_pages(pages: list[Image.Image], file_path: str, dpi: int):
     )
 
 
-def render_project_card(project_image: ProjectImage, dpi: int) -> Image.Image:
+def render_project_card(
+    project_image: ProjectImage, dpi: int, cross_eyed: bool = False
+) -> Image.Image:
     left, right = split_stereo_pair(project_image.source, project_image.settings)
+    if cross_eyed:
+        left, right = right, left
     return render_card(
         apply_style(left, project_image.settings),
         apply_style(right, project_image.settings),
@@ -539,57 +552,42 @@ def draw_guillotine_guides(page: Image.Image, bounds: tuple[int, int, int, int])
     draw.line((0, bottom, page.width - 1, bottom), fill=guide_colour, width=width)
 
 
-def fit_to_box(image: Image.Image, box_w: int, box_h: int) -> Image.Image:
-    fitted = image.copy()
-    fitted.thumbnail((box_w, box_h), Image.Resampling.LANCZOS)
-    return fitted
-
-
 def paste_window(
     card: Image.Image,
     image: Image.Image,
     x: int,
     y: int,
-    shape: str = "Rectangle",
+    shape: WindowShape = WindowShape.RECTANGLE,
     round_corners: bool = False,
-    show_boundary: bool = False,
 ):
     mask = window_mask(image.width, image.height, shape, round_corners=round_corners)
     card.paste(image, (x, y), mask)
 
-    if show_boundary:
-        draw = ImageDraw.Draw(card)
-        draw_window_boundary(
-            draw, x, y, image.width, image.height, shape, round_corners=round_corners
-        )
 
-
-def effective_window_shape(settings: RenderSettings) -> str:
+def effective_window_shape(settings: RenderSettings) -> WindowShape:
     shape = settings.window_shape
-    if shape not in {"Rectangle", "Circle", "Oval", "Arched top"}:
-        return "Rectangle"
 
     spec = CARD_FORMATS[settings.layout_template]
     image_w, image_h = spec.image_mm
     rectangular = abs(image_w - image_h) > 0.01
-    if shape == "Circle" and rectangular:
-        return "Oval"
-    if shape == "Oval" and not rectangular:
-        return "Circle"
+    if shape == WindowShape.CIRCLE and rectangular:
+        return WindowShape.OVAL
+    if shape == WindowShape.OVAL and not rectangular:
+        return WindowShape.CIRCLE
     return shape
 
 
 def window_mask(
-    width: int, height: int, shape: str, round_corners: bool = False
+    width: int, height: int, shape: WindowShape, round_corners: bool = False
 ) -> Image.Image:
-    if shape == "Arched top":
+    if shape == WindowShape.ARCHED_TOP:
         return arched_top_mask(width, height, round_corners=round_corners)
 
     mask = Image.new("L", (width, height), 0)
     draw = ImageDraw.Draw(mask)
-    if shape == "Oval":
+    if shape == WindowShape.OVAL:
         draw.ellipse((0, 0, width - 1, height - 1), fill=255)
-    elif shape == "Circle":
+    elif shape == WindowShape.CIRCLE:
         diameter = min(width, height)
         left = (width - diameter) // 2
         top = (height - diameter) // 2
@@ -712,63 +710,6 @@ def rounded_corner_radius(width: int, height: int) -> int:
     return max(1, round(min(width, height) * 0.08))
 
 
-def draw_window_boundary(
-    draw: ImageDraw.ImageDraw,
-    x: int,
-    y: int,
-    width: int,
-    height: int,
-    shape: str,
-    round_corners: bool = False,
-):
-    outline = (220, 220, 220)
-    if shape == "Oval":
-        draw.ellipse((x, y, x + width, y + height), outline=outline, width=1)
-    elif shape == "Circle":
-        diameter = min(width, height)
-        left = x + (width - diameter) // 2
-        top = y + (height - diameter) // 2
-        draw.ellipse((left, top, left + diameter, top + diameter), outline=outline)
-    elif shape == "Arched top":
-        arch_height = arched_top_depth(width, height)
-        draw.line((x, y + arch_height, x, y + height), fill=outline)
-        draw.line((x + width, y + arch_height, x + width, y + height), fill=outline)
-        draw.line((x, y + height, x + width, y + height), fill=outline)
-        points = [
-            (x + offset_x, y + offset_y)
-            for offset_x, offset_y in arched_top_points(width, height)[2:-2]
-        ]
-        draw.line(points, fill=outline, width=1)
-        if round_corners:
-            radius = rounded_corner_radius(width, height)
-            draw.arc(
-                (x, y + height - 1 - 2 * radius, x + 2 * radius, y + height - 1),
-                90,
-                180,
-                fill=outline,
-                width=1,
-            )
-            draw.arc(
-                (
-                    x + width - 1 - 2 * radius,
-                    y + height - 1 - 2 * radius,
-                    x + width - 1,
-                    y + height - 1,
-                ),
-                0,
-                90,
-                fill=outline,
-                width=1,
-            )
-    elif round_corners:
-        radius = rounded_corner_radius(width, height)
-        draw.rounded_rectangle(
-            (x, y, x + width, y + height), radius=radius, outline=outline, width=1
-        )
-    else:
-        draw.rectangle((x, y, x + width, y + height), outline=outline, width=1)
-
-
 def score_comfort(image: Image.Image, settings: RenderSettings) -> str:
     alignment = stereo_alignment_report(image, settings)
     if (
@@ -786,8 +727,6 @@ def score_comfort(image: Image.Image, settings: RenderSettings) -> str:
     width, height = image.size
     if width < height:
         return "Borderline - portrait source"
-    if abs(settings.convergence) > 28:
-        return "Borderline - strong convergence"
     if width / max(height, 1) < 1.7:
         return "Good - check stereo split"
     return "Excellent"
@@ -811,16 +750,9 @@ def stereo_alignment_report(
     return StereoAlignmentReport(None, 0.0, "opencv")
 
 
-def suggested_right_eye_transform(
-    image: Image.Image, settings: RenderSettings
-) -> tuple[float, ...] | None:
-    source_settings = replace(settings, swap_eyes=False, right_eye_transform=None)
-    left, right = split_stereo_pair(image, source_settings)
+def suggested_right_eye_transform(image: Image.Image) -> tuple[float, ...] | None:
+    left, right = split_stereo_pair(image, RenderSettings())
     return opencv_right_eye_rectification_transform(left, right)
-
-
-def vertical_translation_transform(pixels: int) -> tuple[float, ...]:
-    return (1.0, 0.0, 0.0, 0.0, 1.0, float(pixels))
 
 
 def opencv_right_eye_rectification_transform(

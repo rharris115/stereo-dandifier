@@ -1,5 +1,7 @@
 from dataclasses import dataclass
 
+from stereo_dandifier.models import CardLayoutName
+
 EXPORT_DPI = 300
 MM_PER_INCH = 25.4
 
@@ -16,7 +18,7 @@ class CardLayout:
 
 
 CARD_LAYOUTS = {
-    "holmes_standard": CardLayout(
+    CardLayoutName.HOLMES_STANDARD: CardLayout(
         card_mm=(180, 90),
         image_mm=(70, 70),
         center_spacing_mm=76,
@@ -25,7 +27,7 @@ CARD_LAYOUTS = {
         bottom_margin_mm=12,
         caption_height_mm=10,
     ),
-    "owl_conservative": CardLayout(
+    CardLayoutName.OWL_CONSERVATIVE: CardLayout(
         card_mm=(178, 85),
         image_mm=(68, 60),
         center_spacing_mm=70,
@@ -34,7 +36,7 @@ CARD_LAYOUTS = {
         bottom_margin_mm=16,
         caption_height_mm=12,
     ),
-    "owl_recommended": CardLayout(
+    CardLayoutName.OWL_RECOMMENDED: CardLayout(
         card_mm=(178, 85),
         image_mm=(72, 63),
         center_spacing_mm=72,
@@ -43,7 +45,7 @@ CARD_LAYOUTS = {
         bottom_margin_mm=15,
         caption_height_mm=12,
     ),
-    "owl_dramatic": CardLayout(
+    CardLayoutName.OWL_DRAMATIC: CardLayout(
         card_mm=(178, 85),
         image_mm=(75, 65),
         center_spacing_mm=75,
@@ -52,7 +54,7 @@ CARD_LAYOUTS = {
         bottom_margin_mm=14,
         caption_height_mm=12,
     ),
-    "victorian_underwood": CardLayout(
+    CardLayoutName.VICTORIAN_UNDERWOOD: CardLayout(
         card_mm=(178, 89),
         image_mm=(76, 76),
         center_spacing_mm=76,
@@ -74,7 +76,7 @@ def mm_pair_to_px(value: tuple[float, float], dpi: int = EXPORT_DPI) -> tuple[in
     return mm_to_px(value[0], dpi=dpi), mm_to_px(value[1], dpi=dpi)
 
 
-def format_particulars(name: str) -> str:
+def format_particulars(name: CardLayoutName) -> str:
     layout = CARD_LAYOUTS[name]
     card_w, card_h = layout.card_mm
     image_w, image_h = layout.image_mm

@@ -1,11 +1,13 @@
 import os
+import json
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+import numpy as np
 from PIL import Image
 from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QFont, QTextDocument
-from PySide6.QtWidgets import QApplication, QDialog, QToolBar
+from PySide6.QtWidgets import QApplication, QDialog, QToolBar, QToolButton
 
 from stereo_dandifier.ui import (
     CaptionDialog,
@@ -24,7 +26,13 @@ from stereo_dandifier.ui import (
     window_shape_path,
     window_shapes_for_layout,
 )
-from stereo_dandifier.models import ProjectImage, RenderSettings
+from stereo_dandifier.models import (
+    CaptionPosition,
+    CardLayoutName,
+    ProjectImage,
+    RenderSettings,
+    WindowShape,
+)
 from stereo_dandifier.print_layout import default_page_layout, page_layout_for_name
 
 
@@ -63,6 +71,8 @@ def test_thumbnail_pane_owns_import_and_remove_buttons():
     assert "Import Images" not in toolbar_actions
     assert window.add_thumbnail_button.text() == "+"
     assert window.remove_thumbnail_button.text() == "-"
+    assert window.save_card_action.text() == "Save Current Card Data"
+    assert not window.save_card_action.isEnabled()
 
 
 def test_comfort_report_lives_in_bottom_status_bar():
@@ -95,7 +105,7 @@ def test_comfort_state_controls_preview_border_state():
 def test_comfort_state_for_text_maps_score_prefixes():
     assert comfort_state_for_text("Excellent") == "excellent"
     assert comfort_state_for_text("Good - check stereo split") == "good"
-    assert comfort_state_for_text("Borderline - strong convergence") == "borderline"
+    assert comfort_state_for_text("Borderline - portrait source") == "borderline"
     assert comfort_state_for_text("Poor - vertical alignment off by 4.0px") == "poor"
     assert comfort_state_for_text("No thumbnail selected") == "neutral"
 
@@ -144,13 +154,53 @@ def test_style_slider_changes_do_not_recalculate_comfort(tmp_path, monkeypatch):
     assert calls[-1] == (False, False)
 
 
+def test_auto_improve_photo_button_is_explicit_and_updates_current_source(
+    tmp_path, monkeypatch
+):
+    app = QApplication.instance() or QApplication([])
+    path = tmp_path / "first.png"
+    source = Image.new("RGB", (4, 1))
+    source.putdata(
+        [
+            (20, 20, 20),
+            (80, 80, 80),
+            (120, 120, 120),
+            (220, 220, 220),
+        ]
+    )
+    source.save(path)
+    window = StereoDandifierWindow()
+    monkeypatch.setattr("stereo_dandifier.ui.score_comfort", lambda *_args: "Excellent")
+
+    window._import_paths([path])
+    before = [
+        tuple(pixel) for pixel in np.asarray(window.current_image.source).reshape(-1, 3)
+    ]
+    window.auto_improve.click()
+    after = [
+        tuple(pixel) for pixel in np.asarray(window.current_image.source).reshape(-1, 3)
+    ]
+
+    assert app is not None
+    assert window.auto_improve.text() == "Auto Improve Photo"
+    assert before == [
+        (20, 20, 20),
+        (80, 80, 80),
+        (120, 120, 120),
+        (220, 220, 220),
+    ]
+    assert after[0] == (0, 0, 0)
+    assert after[-1] == (255, 255, 255)
+    assert window.current_image.source.size == (4, 1)
+
+
 def test_export_dialog_hides_render_dpi_detail(tmp_path):
     app = QApplication.instance() or QApplication([])
     default_layout = default_page_layout()
     project_image = ProjectImage(
         path=tmp_path / "large.png",
         source=Image.new("RGB", (12000, 6000), (120, 130, 140)),
-        settings=RenderSettings(layout_template="holmes_standard"),
+        settings=RenderSettings(layout_template=CardLayoutName.HOLMES_STANDARD),
     )
     dialog = ExportDialog(default_layout, [project_image])
 
@@ -222,13 +272,38 @@ def test_card_editor_follows_single_thumbnail_selection(tmp_path):
     assert window.current_image.path == second
     assert "second.png" in window.card_info.text()
     assert window.card_view._has_image
+    assert window.save_card_action.isEnabled()
+
+
+def test_save_current_card_data_writes_json(tmp_path, monkeypatch):
+    app = QApplication.instance() or QApplication([])
+    image_path = tmp_path / "card.png"
+    output_path = tmp_path / "card-data"
+    Image.new("RGB", (8, 4), (25, 50, 75)).save(image_path)
+    window = StereoDandifierWindow()
+
+    window._import_paths([image_path])
+    monkeypatch.setattr(
+        "stereo_dandifier.ui.QFileDialog.getSaveFileName",
+        lambda *_args, **_kwargs: (str(output_path), "JSON document (*.json)"),
+    )
+
+    window.save_current_card_data()
+
+    saved_path = output_path.with_suffix(".json")
+    payload = json.loads(saved_path.read_text(encoding="utf-8"))
+    assert app is not None
+    assert "source_path" not in payload
+    assert payload["settings"]["layout_template"] == CardLayoutName.OWL_RECOMMENDED
+    assert payload["source_image"]["media_type"] == "image/png"
+    assert payload["source_image"]["data"]
 
 
 def test_editor_dpi_uses_source_detail_for_zoomable_card_preview(tmp_path):
     project_image = ProjectImage(
         path=tmp_path / "large.png",
         source=Image.new("RGB", (12000, 6000), (120, 130, 140)),
-        settings=RenderSettings(layout_template="holmes_standard"),
+        settings=RenderSettings(layout_template=CardLayoutName.HOLMES_STANDARD),
     )
 
     assert editor_dpi_for_image(project_image) == 2177
@@ -238,12 +313,12 @@ def test_export_dpi_for_images_uses_selected_originals(tmp_path):
     small = ProjectImage(
         path=tmp_path / "small.png",
         source=Image.new("RGB", (1000, 500), (120, 130, 140)),
-        settings=RenderSettings(layout_template="holmes_standard"),
+        settings=RenderSettings(layout_template=CardLayoutName.HOLMES_STANDARD),
     )
     large = ProjectImage(
         path=tmp_path / "large.png",
         source=Image.new("RGB", (12000, 6000), (120, 130, 140)),
-        settings=RenderSettings(layout_template="holmes_standard"),
+        settings=RenderSettings(layout_template=CardLayoutName.HOLMES_STANDARD),
     )
 
     assert export_dpi_for_images([small, large]) == 2177
@@ -251,13 +326,13 @@ def test_export_dpi_for_images_uses_selected_originals(tmp_path):
 
 def test_caption_placement_updates_current_card_settings(tmp_path):
     app = QApplication.instance() or QApplication([])
-    dialog = CaptionDialog(RenderSettings(caption_position="Left image"))
+    dialog = CaptionDialog(RenderSettings(caption_position=CaptionPosition.LEFT_IMAGE))
 
     dialog.caption_under_left.setChecked(False)
     dialog.caption_under_right.setChecked(True)
 
     assert app is not None
-    assert dialog.caption_position == "Right image"
+    assert dialog.caption_position == CaptionPosition.RIGHT_IMAGE
 
 
 def test_caption_placement_controls_are_below_editor(tmp_path):
@@ -330,7 +405,17 @@ def test_properties_pane_does_not_include_caption_editor(tmp_path):
     assert not hasattr(window, "caption")
     assert not hasattr(window, "caption_position")
     assert not hasattr(window, "window_editor")
-    assert not hasattr(window, "convergence")
+    assert window.cross_eyed_preview not in window.image_group.findChildren(QToolButton)
+
+
+def test_cross_eyed_preview_control_lives_with_card_view():
+    app = QApplication.instance() or QApplication([])
+    window = StereoDandifierWindow()
+
+    assert app is not None
+    assert window.cross_eyed_preview.isCheckable()
+    assert window.cross_eyed_preview.text() == "Cross-eyed preview"
+    assert window.cross_eyed_preview.parentWidget() is not window.image_group
 
 
 def test_card_preview_gets_caption_hotspot(tmp_path):
@@ -407,8 +492,8 @@ def test_window_dialog_exposes_shape_size_and_crop_controls():
     app = QApplication.instance() or QApplication([])
     dialog = WindowDialog(
         RenderSettings(
-            layout_template="owl_recommended",
-            window_shape="Circle",
+            layout_template=CardLayoutName.OWL_RECOMMENDED,
+            window_shape=WindowShape.CIRCLE,
             image_area_percent=75,
             crop_x_percent=-20,
             crop_y_percent=35,
@@ -416,31 +501,31 @@ def test_window_dialog_exposes_shape_size_and_crop_controls():
         preview_image=Image.new("RGB", (100, 80), (120, 130, 140)),
     )
 
-    dialog.shape_buttons["Arched top"].click()
+    dialog.shape_buttons[WindowShape.ARCHED_TOP].click()
     dialog._crop_changed_from_view(50, 15, -10)
 
     assert app is not None
-    assert dialog.window_shape == "Arched top"
+    assert dialog.window_shape == WindowShape.ARCHED_TOP
     assert dialog.image_area_percent == 50
     assert dialog.crop_x_percent == 15
     assert dialog.crop_y_percent == -10
     assert dialog.preview is not None
-    assert "Oval" in dialog.shape_buttons
-    assert "Circle" not in dialog.shape_buttons
+    assert WindowShape.OVAL in dialog.shape_buttons
+    assert WindowShape.CIRCLE not in dialog.shape_buttons
 
 
 def test_window_dialog_disables_round_corners_for_circle_shape():
     app = QApplication.instance() or QApplication([])
     dialog = WindowDialog(
         RenderSettings(
-            layout_template="holmes_standard",
-            window_shape="Rectangle",
+            layout_template=CardLayoutName.HOLMES_STANDARD,
+            window_shape=WindowShape.RECTANGLE,
             window_round_corners=True,
         ),
         preview_image=Image.new("RGB", (100, 80), (120, 130, 140)),
     )
 
-    dialog.shape_buttons["Circle"].click()
+    dialog.shape_buttons[WindowShape.CIRCLE].click()
 
     assert app is not None
     assert not dialog.round_corners.isEnabled()
@@ -448,15 +533,19 @@ def test_window_dialog_disables_round_corners_for_circle_shape():
 
 
 def test_window_dialog_uses_oval_for_rectangular_layouts():
-    settings = RenderSettings(layout_template="owl_recommended")
+    settings = RenderSettings(layout_template=CardLayoutName.OWL_RECOMMENDED)
 
-    assert window_shapes_for_layout(settings) == ("Rectangle", "Oval", "Arched top")
+    assert window_shapes_for_layout(settings) == (
+        WindowShape.RECTANGLE,
+        WindowShape.OVAL,
+        WindowShape.ARCHED_TOP,
+    )
 
 
 def test_window_dialog_keeps_round_corners_for_rectangle_shape():
     app = QApplication.instance() or QApplication([])
     dialog = WindowDialog(
-        RenderSettings(window_shape="Rectangle", window_round_corners=True),
+        RenderSettings(window_shape=WindowShape.RECTANGLE, window_round_corners=True),
         preview_image=Image.new("RGB", (100, 80), (120, 130, 140)),
     )
 
@@ -522,7 +611,7 @@ def test_source_window_view_reflects_selected_window_shape():
     app = QApplication.instance() or QApplication([])
     view = SourceWindowView(
         Image.new("RGB", (100, 100), (120, 130, 140)),
-        RenderSettings(image_area_percent=50, window_shape="Circle"),
+        RenderSettings(image_area_percent=50, window_shape=WindowShape.CIRCLE),
     )
 
     assert app is not None
@@ -531,7 +620,7 @@ def test_source_window_view_reflects_selected_window_shape():
 
 
 def test_window_shape_path_supports_arched_top():
-    path = window_shape_path(QRectF(10, 10, 40, 60), "Arched top")
+    path = window_shape_path(QRectF(10, 10, 40, 60), WindowShape.ARCHED_TOP)
 
     assert not path.contains(QRectF(10, 10, 1, 1).center())
     assert path.contains(QRectF(30, 10, 1, 1).center())
@@ -540,7 +629,9 @@ def test_window_shape_path_supports_arched_top():
 
 
 def test_window_shape_path_supports_rounded_rectangle():
-    path = window_shape_path(QRectF(10, 10, 40, 60), "Rectangle", round_corners=True)
+    path = window_shape_path(
+        QRectF(10, 10, 40, 60), WindowShape.RECTANGLE, round_corners=True
+    )
 
     assert not path.contains(QPointF(10.1, 10.1))
     assert path.contains(QRectF(30, 10, 1, 1).center())

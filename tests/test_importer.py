@@ -4,7 +4,9 @@ from types import SimpleNamespace
 
 from PIL import Image
 
+from stereo_dandifier.card_json import save_card_json
 from stereo_dandifier.importer import load_project_images, load_raw_project_images
+from stereo_dandifier.models import ProjectImage, RenderSettings
 
 
 def test_single_frame_file_imports_one_project_image(tmp_path):
@@ -40,6 +42,28 @@ def test_multi_frame_file_imports_selectable_project_images(tmp_path):
     assert images[1].source.getpixel((0, 0)) == (0, 0, 255)
 
 
+def test_card_json_imports_embedded_card_data(tmp_path):
+    path = tmp_path / "0006_20260528_200109-frame-1-preview-stereocard.json"
+    save_card_json(
+        ProjectImage(
+            path=tmp_path / "source.png",
+            source=Image.new("RGB", (8, 4), (25, 50, 75)),
+            exif={"Camera": "Kandao"},
+            settings=RenderSettings(brightness=120),
+        ),
+        path,
+    )
+
+    images = load_project_images(path)
+
+    assert len(images) == 1
+    assert images[0].path == path
+    assert images[0].source.size == (8, 4)
+    assert images[0].source.getpixel((0, 0)) == (25, 50, 75)
+    assert images[0].exif == {"Camera": "Kandao"}
+    assert images[0].settings.brightness == 120
+
+
 def test_dng_import_uses_raw_preview_and_raw_render_when_rawpy_is_available(
     tmp_path, monkeypatch
 ):
@@ -60,7 +84,6 @@ def test_dng_import_uses_raw_preview_and_raw_render_when_rawpy_is_available(
     images = load_raw_project_images(path)
 
     assert [image.variant_name for image in images] == ["Preview", "RAW render"]
-    assert [image.selected_for_export for image in images] == [False, True]
     assert images[0].display_name == "image.dng [Preview]"
     assert images[1].display_name == "image.dng [RAW render]"
     assert images[0].thumbnail_name == "Preview"

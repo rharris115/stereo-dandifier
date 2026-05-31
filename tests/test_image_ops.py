@@ -10,11 +10,13 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from stereo_dandifier.formats import CARD_FORMATS, mm_pair_to_px, mm_to_px
 from stereo_dandifier.image_ops import (
     PDF_IMAGE_SAVE_OPTIONS,
+    apply_shared_levels,
     apply_style,
+    auto_improve_stereo_pair,
     caption_html_text,
-    caption_positions,
     caption_windows,
     card_window_geometry,
+    compute_shared_levels,
     centered_caption_y,
     crop_axis_origin,
     crop_to_window,
@@ -23,10 +25,9 @@ from stereo_dandifier.image_ops import (
     card_grid,
     native_card_image_dpi,
     render_caption_html,
+    render_project_card,
     render_print_pages,
     render_card,
-    render_print_preview,
-    save_pdf,
     save_pdf_pages,
     score_comfort,
     source_metadata_dpi,
@@ -35,26 +36,32 @@ from stereo_dandifier.image_ops import (
     stereo_alignment_report,
     stereo_window_x_positions,
     suggested_right_eye_transform,
-    trim_transparent,
     trim_vertical_transparent,
-    vertical_translation_transform,
     visible_image_bottom,
     window_bounds_for_project,
     window_mask,
 )
-from stereo_dandifier.models import ProjectImage, RenderSettings, plain_caption_html
+from stereo_dandifier.models import (
+    CaptionPosition,
+    CardLayoutName,
+    ProjectImage,
+    RenderSettings,
+    ToneMode,
+    WindowShape,
+    plain_caption_html,
+)
 from stereo_dandifier.print_layout import page_layout_for_name
 
 
-def test_split_stereo_pair_swaps_eyes_by_default():
+def test_split_stereo_pair_keeps_left_right_order():
     image = Image.new("RGB", (4, 2))
     image.paste((255, 0, 0), (0, 0, 2, 2))
     image.paste((0, 0, 255), (2, 0, 4, 2))
 
     left, right = split_stereo_pair(image, RenderSettings())
 
-    assert left.getpixel((0, 0)) == (0, 0, 255)
-    assert right.getpixel((0, 0)) == (255, 0, 0)
+    assert left.getpixel((0, 0)) == (255, 0, 0)
+    assert right.getpixel((0, 0)) == (0, 0, 255)
 
 
 def test_split_stereo_pair_applies_rectification_transform_before_swap():
@@ -65,13 +72,31 @@ def test_split_stereo_pair_applies_rectification_transform_before_swap():
     left, right = split_stereo_pair(
         image,
         RenderSettings(
-            swap_eyes=False,
-            right_eye_transform=vertical_translation_transform(-2),
+            right_eye_transform=(1.0, 0.0, 0.0, 0.0, 1.0, -2.0),
         ),
     )
 
     assert left.getpixel((0, 2)) == (255, 0, 0)
     assert right.getpixel((0, 0)) == (0, 0, 255)
+
+
+def test_render_project_card_only_crosses_when_preview_requests_it(tmp_path):
+    source = Image.new("RGB", (800, 300))
+    source.paste((255, 0, 0), (0, 0, 400, 300))
+    source.paste((0, 0, 255), (400, 0, 800, 300))
+    project_image = ProjectImage(path=tmp_path / "card.png", source=source)
+    left_x, right_x, top, image_w, image_h, _spacing = card_window_geometry(
+        project_image.settings, dpi=300
+    )
+
+    normal = render_project_card(project_image, dpi=300)
+    crossed = render_project_card(project_image, dpi=300, cross_eyed=True)
+    sample_y = top + image_h // 2
+
+    assert normal.getpixel((left_x + image_w // 2, sample_y)) == (255, 0, 0)
+    assert normal.getpixel((right_x + image_w // 2, sample_y)) == (0, 0, 255)
+    assert crossed.getpixel((left_x + image_w // 2, sample_y)) == (0, 0, 255)
+    assert crossed.getpixel((right_x + image_w // 2, sample_y)) == (255, 0, 0)
 
 
 @pytest.mark.parametrize("name,spec", CARD_FORMATS.items())
@@ -98,21 +123,21 @@ def test_render_card_can_use_higher_preview_dpi():
 
 def test_native_card_image_dpi_uses_original_eye_pixels_and_card_window_size():
     source = Image.new("RGB", (4000, 2000), (120, 130, 140))
-    settings = RenderSettings(layout_template="holmes_standard")
+    settings = RenderSettings(layout_template=CardLayoutName.HOLMES_STANDARD)
 
     assert native_card_image_dpi(source, settings) == 726
 
 
 def test_export_dpi_uses_native_source_detail_above_preview_floor():
     source = Image.new("RGB", (12000, 6000), (120, 130, 140))
-    settings = RenderSettings(layout_template="holmes_standard")
+    settings = RenderSettings(layout_template=CardLayoutName.HOLMES_STANDARD)
 
     assert export_dpi_for_source(source, settings, minimum_dpi=600) == 2177
 
 
 def test_export_dpi_never_drops_below_preview_floor():
     source = Image.new("RGB", (1000, 500), (120, 130, 140))
-    settings = RenderSettings(layout_template="holmes_standard")
+    settings = RenderSettings(layout_template=CardLayoutName.HOLMES_STANDARD)
 
     assert export_dpi_for_source(source, settings, minimum_dpi=600) == 600
 
@@ -120,7 +145,7 @@ def test_export_dpi_never_drops_below_preview_floor():
 def test_export_dpi_can_use_source_metadata_dpi():
     source = Image.new("RGB", (1000, 500), (120, 130, 140))
     source.info["dpi"] = (720, 720)
-    settings = RenderSettings(layout_template="holmes_standard")
+    settings = RenderSettings(layout_template=CardLayoutName.HOLMES_STANDARD)
 
     assert export_dpi_for_source(source, settings, minimum_dpi=1) == 720
 
@@ -140,23 +165,6 @@ def test_render_card_defaults_to_white_without_visible_window_borders():
     card = render_card(left, right, settings)
 
     assert card.getpixel((5, 5)) == (255, 255, 255)
-
-
-@pytest.mark.parametrize(
-    "caption_position,expected",
-    [
-        ("Left image", [10]),
-        ("Right image", [90]),
-        ("Both images", [10, 90]),
-    ],
-)
-def test_caption_positions_anchor_under_selected_image_windows(
-    caption_position, expected
-):
-    assert (
-        caption_positions(caption_position, left_x=10, right_x=90, image_w=70)
-        == expected
-    )
 
 
 def test_stereo_window_positions_center_pair_on_card():
@@ -185,7 +193,7 @@ def test_caption_windows_start_from_visible_fitted_image_bottom():
     right = Image.new("RGB", (70, 50))
 
     assert caption_windows(
-        "Both images", 10, 90, left, right, image_y=8, image_h=70
+        CaptionPosition.BOTH_IMAGES, 10, 90, left, right, image_y=8, image_h=70
     ) == [
         (10, 58),
         (90, 68),
@@ -221,15 +229,6 @@ def test_caption_render_includes_multiple_lines():
 
     assert app is not None
     assert len(alpha_line_clusters(rendered)) >= 2
-
-
-def test_trim_transparent_crops_caption_to_visible_content():
-    image = Image.new("RGBA", (20, 20), (0, 0, 0, 0))
-    image.paste((10, 20, 30, 255), (4, 6, 12, 14))
-
-    trimmed = trim_transparent(image)
-
-    assert trimmed.size == (8, 8)
 
 
 def test_trim_vertical_transparent_keeps_caption_width_for_alignment():
@@ -271,7 +270,10 @@ def test_caption_is_centered_between_visible_image_bottom_and_card_bottom():
 
 
 def test_circle_window_masks_window_corners():
-    settings = RenderSettings(layout_template="holmes_standard", window_shape="Circle")
+    settings = RenderSettings(
+        layout_template=CardLayoutName.HOLMES_STANDARD,
+        window_shape=WindowShape.CIRCLE,
+    )
     source = Image.new("RGB", (800, 300), (255, 0, 0))
 
     card = render_card(source, source, settings, dpi=300)
@@ -286,9 +288,12 @@ def test_circle_window_masks_window_corners():
 
 
 def test_rectangular_layouts_render_circle_choice_as_oval():
-    settings = RenderSettings(layout_template="owl_recommended", window_shape="Circle")
+    settings = RenderSettings(
+        layout_template=CardLayoutName.OWL_RECOMMENDED,
+        window_shape=WindowShape.CIRCLE,
+    )
 
-    assert effective_window_shape(settings) == "Oval"
+    assert effective_window_shape(settings) == WindowShape.OVAL
 
 
 def test_window_crop_offset_selects_different_source_area():
@@ -336,7 +341,7 @@ def test_crop_axis_origin_maps_percent_to_available_offset():
 
 
 def test_window_mask_supports_classic_arched_top():
-    mask = window_mask(20, 30, "Arched top")
+    mask = window_mask(20, 30, WindowShape.ARCHED_TOP)
 
     assert mask.getpixel((0, 0)) == 0
     assert mask.getpixel((10, 0)) > 200
@@ -346,7 +351,7 @@ def test_window_mask_supports_classic_arched_top():
 
 
 def test_window_mask_supports_rounded_rectangle_corners():
-    mask = window_mask(40, 60, "Rectangle", round_corners=True)
+    mask = window_mask(40, 60, WindowShape.RECTANGLE, round_corners=True)
 
     assert mask.getpixel((0, 0)) == 0
     assert mask.getpixel((20, 0)) == 255
@@ -354,7 +359,7 @@ def test_window_mask_supports_rounded_rectangle_corners():
 
 
 def test_window_mask_supports_rounded_arched_bottom_corners():
-    mask = window_mask(40, 60, "Arched top", round_corners=True)
+    mask = window_mask(40, 60, WindowShape.ARCHED_TOP, round_corners=True)
 
     assert mask.getpixel((0, 59)) < 255
     assert mask.getpixel((20, 59)) == 255
@@ -374,7 +379,7 @@ def test_window_bounds_for_project_matches_rendered_window_pair(tmp_path):
 
 def test_black_and_white_mode_removes_colour():
     source = Image.new("RGB", (1, 1), (200, 80, 20))
-    styled = apply_style(source, RenderSettings(tone_mode="Black and White"))
+    styled = apply_style(source, RenderSettings(tone_mode=ToneMode.BLACK_AND_WHITE))
 
     red, green, blue = styled.getpixel((0, 0))
     assert red == green == blue
@@ -382,7 +387,9 @@ def test_black_and_white_mode_removes_colour():
 
 def test_sepia_mode_tints_grayscale_image():
     source = Image.new("RGB", (1, 1), (200, 80, 20))
-    styled = apply_style(source, RenderSettings(tone_mode="Sepia", sepia_strength=80))
+    styled = apply_style(
+        source, RenderSettings(tone_mode=ToneMode.SEPIA, sepia_strength=80)
+    )
 
     red, green, blue = styled.getpixel((0, 0))
     assert red > green > blue
@@ -390,15 +397,76 @@ def test_sepia_mode_tints_grayscale_image():
 
 def test_colour_mode_can_adjust_saturation():
     source = Image.new("RGB", (1, 1), (180, 100, 100))
-    styled = apply_style(source, RenderSettings(tone_mode="Colour", saturation=40))
+    styled = apply_style(
+        source, RenderSettings(tone_mode=ToneMode.COLOUR, saturation=40)
+    )
 
     assert styled.getpixel((0, 0)) != source.getpixel((0, 0))
+
+
+def test_compute_shared_levels_uses_combined_eye_statistics():
+    left = Image.new("RGB", (2, 1))
+    left.putdata([(10, 20, 30), (100, 110, 120)])
+    right = Image.new("RGB", (2, 1))
+    right.putdata([(150, 160, 170), (240, 250, 255)])
+
+    low, high = compute_shared_levels(left, right, cutoff=0)
+
+    np.testing.assert_allclose(low, np.array([10, 20, 30], dtype=np.float32))
+    np.testing.assert_allclose(high, np.array([240, 250, 255], dtype=np.float32))
+
+
+def test_auto_improve_stereo_pair_applies_identical_levels_to_both_eyes():
+    left = Image.new("RGB", (3, 1))
+    left.putdata([(20, 20, 20), (100, 120, 140), (120, 120, 120)])
+    right = Image.new("RGB", (3, 1))
+    right.putdata([(100, 120, 140), (180, 180, 180), (240, 240, 240)])
+
+    adjusted_left, adjusted_right = auto_improve_stereo_pair(left, right, cutoff=0)
+
+    assert adjusted_left.getpixel((1, 0)) == adjusted_right.getpixel((0, 0))
+
+
+def test_auto_improve_stereo_pair_preserves_size_and_returns_rgb():
+    left = Image.new("L", (3, 2), 80)
+    right = Image.new("RGBA", (4, 1), (120, 130, 140, 128))
+
+    adjusted_left, adjusted_right = auto_improve_stereo_pair(left, right)
+
+    assert adjusted_left.size == left.size
+    assert adjusted_right.size == right.size
+    assert adjusted_left.mode == "RGB"
+    assert adjusted_right.mode == "RGB"
+
+
+def test_shared_levels_handles_flat_low_contrast_images_cleanly():
+    left = Image.new("L", (2, 2), 118)
+    right = Image.new("RGB", (2, 2), (120, 120, 120))
+
+    adjusted_left, adjusted_right = auto_improve_stereo_pair(left, right)
+
+    assert adjusted_left.mode == "RGB"
+    assert adjusted_right.mode == "RGB"
+    assert adjusted_left.size == left.size
+    assert adjusted_right.size == right.size
+    assert adjusted_left.getpixel((0, 0)) == (0, 0, 0)
+    assert adjusted_right.getpixel((0, 0)) == (255, 255, 255)
+
+
+def test_apply_shared_levels_leaves_zero_range_channels_unchanged():
+    image = Image.new("RGB", (1, 1), (40, 100, 200))
+    low = np.array([40, 100, 10], dtype=np.float32)
+    high = np.array([40, 100, 210], dtype=np.float32)
+
+    adjusted = apply_shared_levels(image, low, high)
+
+    assert adjusted.getpixel((0, 0)) == (40, 100, 242)
 
 
 def test_stereo_alignment_report_detects_vertical_offset():
     source = synthetic_stereo_pair(vertical_offset=4)
 
-    report = stereo_alignment_report(source, RenderSettings(swap_eyes=False))
+    report = stereo_alignment_report(source, RenderSettings())
 
     assert report.vertical_offset_px == pytest.approx(4, abs=0.25)
     assert report.confidence >= 0.35
@@ -407,17 +475,16 @@ def test_stereo_alignment_report_detects_vertical_offset():
 def test_comfort_status_warns_about_rectification_issue():
     source = synthetic_stereo_pair(vertical_offset=4)
 
-    score = score_comfort(source, RenderSettings(swap_eyes=False))
+    score = score_comfort(source, RenderSettings())
 
     assert score.startswith("Poor - vertical alignment off by")
 
 
 def test_suggested_right_eye_transform_corrects_rectification_issue():
     source = synthetic_stereo_pair(vertical_offset=4)
-    settings = RenderSettings(swap_eyes=True)
 
-    transform = suggested_right_eye_transform(source, settings)
-    rectified_settings = RenderSettings(swap_eyes=True, right_eye_transform=transform)
+    transform = suggested_right_eye_transform(source)
+    rectified_settings = RenderSettings(right_eye_transform=transform)
 
     assert transform is not None
     assert len(transform) in {6, 9}
@@ -428,14 +495,14 @@ def test_suggested_right_eye_transform_corrects_rectification_issue():
 def test_comfort_status_ignores_textureless_alignment_analysis():
     source = Image.new("RGB", (320, 100), (120, 130, 140))
 
-    assert score_comfort(source, RenderSettings(swap_eyes=False)) == "Excellent"
+    assert score_comfort(source, RenderSettings()) == "Excellent"
 
 
 def test_print_preview_places_card_on_paper_with_blue_cut_guides():
     card = Image.new("RGB", (300, 120), (255, 255, 255))
     page_layout = page_layout_for_name("A4")
 
-    preview = render_print_preview(card, page_layout)
+    preview = render_print_pages([card], page_layout)[0]
 
     assert preview.size == mm_pair_to_px(page_layout.size_mm)
     columns, rows = card_grid(card.width, card.height, page_layout)
@@ -455,22 +522,13 @@ def test_print_pages_maximise_cards_per_page():
     page_layout = page_layout_for_name("A4")
     card = Image.new(
         "RGB",
-        mm_pair_to_px(CARD_FORMATS["holmes_standard"].card_mm),
+        mm_pair_to_px(CARD_FORMATS[CardLayoutName.HOLMES_STANDARD].card_mm),
         (255, 255, 255),
     )
 
     pages = render_print_pages([card, card, card, card], page_layout)
 
     assert len(pages) == 2
-
-
-def test_save_pdf_writes_pdf_file(tmp_path):
-    path = tmp_path / "card.pdf"
-    page = Image.new("RGB", (120, 80), (255, 255, 255))
-
-    save_pdf(page, str(path), dpi=600)
-
-    assert path.read_bytes().startswith(b"%PDF")
 
 
 def test_save_pdf_pages_uses_high_quality_image_encoding(monkeypatch):
