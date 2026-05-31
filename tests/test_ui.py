@@ -5,7 +5,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PIL import Image
 from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QFont, QTextDocument
-from PySide6.QtWidgets import QApplication, QToolBar
+from PySide6.QtWidgets import QApplication, QDialog, QToolBar
 
 from stereo_dandifier.ui import (
     CaptionDialog,
@@ -98,6 +98,50 @@ def test_comfort_state_for_text_maps_score_prefixes():
     assert comfort_state_for_text("Borderline - strong convergence") == "borderline"
     assert comfort_state_for_text("Poor - vertical alignment off by 4.0px") == "poor"
     assert comfort_state_for_text("No thumbnail selected") == "neutral"
+
+
+def test_style_sliders_do_not_track_every_drag_tick():
+    app = QApplication.instance() or QApplication([])
+    window = StereoDandifierWindow()
+
+    assert app is not None
+    assert not window.brightness.hasTracking()
+    assert not window.contrast.hasTracking()
+    assert not window.saturation.hasTracking()
+    assert not window.sepia_strength.hasTracking()
+
+
+def test_style_sliders_have_expanded_adjustment_ranges():
+    app = QApplication.instance() or QApplication([])
+    window = StereoDandifierWindow()
+
+    assert app is not None
+    assert (window.brightness.minimum(), window.brightness.maximum()) == (-100, 300)
+    assert (window.contrast.minimum(), window.contrast.maximum()) == (-100, 100)
+    assert (window.saturation.minimum(), window.saturation.maximum()) == (-100, 100)
+    assert (window.sepia_strength.minimum(), window.sepia_strength.maximum()) == (
+        0,
+        100,
+    )
+
+
+def test_style_slider_changes_do_not_recalculate_comfort(tmp_path, monkeypatch):
+    app = QApplication.instance() or QApplication([])
+    path = tmp_path / "first.png"
+    Image.new("RGB", (80, 40), (120, 130, 140)).save(path)
+    window = StereoDandifierWindow()
+    calls = []
+
+    def fake_refresh(*, reset_view=False, recalculate_comfort=True):
+        calls.append((reset_view, recalculate_comfort))
+
+    window._import_paths([path])
+    monkeypatch.setattr(window, "_refresh_previews", fake_refresh)
+
+    window.brightness.setValue(12)
+
+    assert app is not None
+    assert calls[-1] == (False, False)
 
 
 def test_export_dialog_hides_render_dpi_detail(tmp_path):
@@ -326,6 +370,36 @@ def test_card_preview_hotspots_have_editing_tooltips(tmp_path):
     assert app is not None
     assert any("stereo window" in tooltip for tooltip in tooltips)
     assert any("caption" in tooltip for tooltip in tooltips)
+
+
+def test_window_editor_preview_uses_style_adjustments(tmp_path, monkeypatch):
+    app = QApplication.instance() or QApplication([])
+    path = tmp_path / "card.png"
+    image = Image.new("RGB", (8, 4), (50, 50, 50))
+    image.save(path)
+    window = StereoDandifierWindow()
+    captured = {}
+
+    class FakeWindowDialog:
+        def __init__(self, settings, parent=None, preview_image=None):
+            captured["preview_image"] = preview_image
+            self.window_shape = settings.window_shape
+            self.window_round_corners = settings.window_round_corners
+            self.image_area_percent = settings.image_area_percent
+            self.crop_x_percent = settings.crop_x_percent
+            self.crop_y_percent = settings.crop_y_percent
+
+        def exec(self):
+            return QDialog.DialogCode.Rejected
+
+    window._import_paths([path])
+    window.current_image.settings.brightness = 100
+    monkeypatch.setattr("stereo_dandifier.ui.WindowDialog", FakeWindowDialog)
+
+    window.edit_window()
+
+    assert app is not None
+    assert captured["preview_image"].getpixel((0, 0)) == (100, 100, 100)
 
 
 def test_window_dialog_exposes_shape_size_and_crop_controls():

@@ -57,6 +57,7 @@ from PySide6.QtWidgets import (
 
 from stereo_dandifier.formats import CARD_FORMATS, format_particulars
 from stereo_dandifier.image_ops import (
+    apply_style,
     caption_bounds_for_project,
     export_dpi_for_source,
     render_print_pages,
@@ -596,7 +597,7 @@ class StereoDandifierWindow(QMainWindow):
         image_layout = QFormLayout(self.image_group)
         self.swap_eyes = QCheckBox("Swap eyes for cross-eyed preview")
         self.swap_eyes.toggled.connect(self._controls_changed)
-        self.convergence = self._make_slider(-40, 40, 0)
+        self.convergence = self._make_slider(-40, 40, 0, affects_comfort=True)
         image_layout.addRow(self.swap_eyes)
         image_layout.addRow("Convergence", self.convergence)
         self.auto_rectify = QPushButton("Stereo Rectify")
@@ -634,13 +635,13 @@ class StereoDandifierWindow(QMainWindow):
         self.tone_mode = QComboBox()
         self.tone_mode.addItems(["Colour", "Black and White", "Sepia"])
         self.tone_mode.currentTextChanged.connect(self._tone_mode_changed)
-        self.brightness = self._make_slider(-50, 50, 0)
-        self.contrast = self._make_slider(-50, 50, 0)
+        self.brightness = self._make_slider(-100, 300, 0, affects_comfort=False)
+        self.contrast = self._make_slider(-100, 100, 0, affects_comfort=False)
         self.saturation_label, self.saturation = self._add_slider_row(
-            style_layout, "Saturation", -50, 50, 0
+            style_layout, "Saturation", -100, 100, 0, affects_comfort=False
         )
         self.sepia_strength_label, self.sepia_strength = self._add_slider_row(
-            style_layout, "Sepia Strength", 0, 100, 45
+            style_layout, "Sepia Strength", 0, 100, 45, affects_comfort=False
         )
         style_layout.insertRow(0, "Mode", self.tone_mode)
         style_layout.insertRow(1, "Brightness", self.brightness)
@@ -652,11 +653,22 @@ class StereoDandifierWindow(QMainWindow):
         layout.addStretch(1)
         return panel
 
-    def _make_slider(self, minimum: int, maximum: int, value: int) -> QSlider:
+    def _make_slider(
+        self,
+        minimum: int,
+        maximum: int,
+        value: int,
+        affects_comfort: bool = True,
+    ) -> QSlider:
         slider = QSlider(Qt.Orientation.Horizontal)
         slider.setRange(minimum, maximum)
         slider.setValue(value)
-        slider.valueChanged.connect(self._controls_changed)
+        slider.setTracking(False)
+        slider.valueChanged.connect(
+            lambda _value, recalculate=affects_comfort: self._controls_changed(
+                recalculate_comfort=recalculate
+            )
+        )
         return slider
 
     def _add_slider_row(
@@ -666,9 +678,10 @@ class StereoDandifierWindow(QMainWindow):
         minimum: int,
         maximum: int,
         value: int,
+        affects_comfort: bool = True,
     ) -> tuple[QLabel, QSlider]:
         label = QLabel(label_text)
-        slider = self._make_slider(minimum, maximum, value)
+        slider = self._make_slider(minimum, maximum, value, affects_comfort)
         layout.addRow(label, slider)
         return label, slider
 
@@ -1029,7 +1042,7 @@ class StereoDandifierWindow(QMainWindow):
         self.sepia_strength.setValue(defaults[mode]["sepia_strength"])
         self._update_tone_controls(mode)
         self._updating_controls = False
-        self._controls_changed()
+        self._controls_changed(recalculate_comfort=False)
 
     def _update_tone_controls(self, mode: str):
         colour_mode = mode == "Colour"
@@ -1051,7 +1064,7 @@ class StereoDandifierWindow(QMainWindow):
         self.layout_info.setText(particulars)
         self.layout_template.setToolTip(particulars)
 
-    def _controls_changed(self, *_args):
+    def _controls_changed(self, *_args, recalculate_comfort: bool = True):
         if self._updating_controls:
             return
 
@@ -1077,7 +1090,7 @@ class StereoDandifierWindow(QMainWindow):
             convergence=self.convergence.value(),
             right_eye_transform=current.settings.right_eye_transform,
         )
-        self._refresh_previews()
+        self._refresh_previews(recalculate_comfort=recalculate_comfort)
 
     def auto_rectify_current_image(self):
         current = self.current_image
@@ -1100,7 +1113,9 @@ class StereoDandifierWindow(QMainWindow):
         self._refresh_previews(reset_view=True)
         self.statusBar().showMessage("Applied right-eye rectification transform")
 
-    def _refresh_previews(self, reset_view: bool = False):
+    def _refresh_previews(
+        self, reset_view: bool = False, recalculate_comfort: bool = True
+    ):
         self.export_action.setEnabled(bool(self.selected_project_images()))
         self._update_card_info()
         current = self.current_image
@@ -1128,7 +1143,8 @@ class StereoDandifierWindow(QMainWindow):
                 ],
             ]
         )
-        self._set_comfort(score_comfort(current.source, current.settings))
+        if recalculate_comfort:
+            self._set_comfort(score_comfort(current.source, current.settings))
 
     def edit_caption(self):
         current = self.current_image
@@ -1152,6 +1168,7 @@ class StereoDandifierWindow(QMainWindow):
             return
 
         preview_image, _right = split_stereo_pair(current.source, current.settings)
+        preview_image = apply_style(preview_image, current.settings)
         dialog = WindowDialog(current.settings, self, preview_image=preview_image)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
