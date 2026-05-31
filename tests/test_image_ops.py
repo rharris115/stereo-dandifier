@@ -7,37 +7,49 @@ from PySide6.QtWidgets import QApplication
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from stereo_dandifier.caption_rendering import (
+    caption_html_text,
+    caption_windows,
+    centered_caption_y,
+    render_caption_html,
+    trim_vertical_transparent,
+    visible_image_bottom,
+)
+from stereo_dandifier.card_rendering import (
+    render_card,
+    render_project_card,
+)
 from stereo_dandifier.formats import CARD_FORMATS, mm_pair_to_px, mm_to_px
-from stereo_dandifier.image_ops import (
-    PDF_IMAGE_SAVE_OPTIONS,
+from stereo_dandifier.image_metadata import (
+    export_dpi_for_source,
+    native_card_image_dpi,
+    source_metadata_dpi,
+)
+from stereo_dandifier.photo_ops import (
     apply_shared_levels,
     apply_style,
     auto_improve_stereo_pair,
-    caption_html_text,
-    caption_windows,
-    card_window_geometry,
     compute_shared_levels,
-    centered_caption_y,
+)
+from stereo_dandifier.print_rendering import (
+    PDF_IMAGE_SAVE_OPTIONS,
+    card_grid,
+    render_print_pages,
+    save_pdf_pages,
+)
+from stereo_dandifier.stereo_ops import (
+    score_comfort,
+    split_stereo_pair,
+    stereo_alignment_report,
+    suggested_right_eye_transform,
+)
+from stereo_dandifier.window_geometry import (
+    card_window_geometry,
     crop_axis_origin,
     crop_to_window,
     effective_window_shape,
-    export_dpi_for_source,
-    card_grid,
-    native_card_image_dpi,
-    render_caption_html,
-    render_project_card,
-    render_print_pages,
-    render_card,
-    save_pdf_pages,
-    score_comfort,
-    source_metadata_dpi,
-    split_stereo_pair,
     source_crop_box,
-    stereo_alignment_report,
     stereo_window_x_positions,
-    suggested_right_eye_transform,
-    trim_vertical_transparent,
-    visible_image_bottom,
     window_bounds_for_project,
     window_mask,
 )

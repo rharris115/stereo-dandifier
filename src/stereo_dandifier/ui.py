@@ -56,21 +56,26 @@ from PySide6.QtWidgets import (
     QFontComboBox,
 )
 
-from stereo_dandifier.formats import CARD_FORMATS, format_particulars
 from stereo_dandifier.card_json import save_card_json
-from stereo_dandifier.image_ops import (
-    auto_improve_stereo_pair,
-    apply_style,
+from stereo_dandifier.card_rendering import (
     caption_bounds_for_project,
-    export_dpi_for_source,
-    render_print_pages,
     render_project_card,
+)
+from stereo_dandifier.formats import CARD_FORMATS, format_particulars
+from stereo_dandifier.image_metadata import export_dpi_for_source
+from stereo_dandifier.photo_ops import apply_style, auto_improve_stereo_pair
+from stereo_dandifier.print_rendering import (
+    render_print_pages,
     save_pdf_pages,
+)
+from stereo_dandifier.stereo_ops import (
     score_comfort,
-    effective_window_shape,
-    source_crop_box,
     split_stereo_pair,
     suggested_right_eye_transform,
+)
+from stereo_dandifier.window_geometry import (
+    effective_window_shape,
+    source_crop_box,
     window_bounds_for_project,
 )
 from stereo_dandifier.importer import load_project_images
