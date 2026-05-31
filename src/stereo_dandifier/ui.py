@@ -525,7 +525,6 @@ class StereoDandifierWindow(QMainWindow):
         toolbar.setIconSize(QSize(18, 18))
         self.addToolBar(toolbar)
 
-        toolbar.addAction(self.import_action)
         toolbar.addAction(self.export_action)
 
         self.comfort_label = QLabel()
@@ -538,14 +537,30 @@ class StereoDandifierWindow(QMainWindow):
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(12, 12, 12, 12)
 
+        header = QHBoxLayout()
         title = QLabel("Thumbnails")
         title.setObjectName("panelTitle")
-        layout.addWidget(title)
+        header.addWidget(title)
+        header.addStretch(1)
+
+        self.add_thumbnail_button = QToolButton()
+        self.add_thumbnail_button.setText("+")
+        self.add_thumbnail_button.setToolTip("Import images")
+        self.add_thumbnail_button.clicked.connect(self.import_images)
+        header.addWidget(self.add_thumbnail_button)
+
+        self.remove_thumbnail_button = QToolButton()
+        self.remove_thumbnail_button.setText("-")
+        self.remove_thumbnail_button.setToolTip("Remove selected thumbnail")
+        self.remove_thumbnail_button.setEnabled(False)
+        self.remove_thumbnail_button.clicked.connect(self._remove_current_thumbnail)
+        header.addWidget(self.remove_thumbnail_button)
+
+        layout.addLayout(header)
 
         self.library = QListWidget()
         self.library.setIconSize(QSize(96, 64))
         self.library.currentItemChanged.connect(self._select_library_item)
-        self.library.itemChanged.connect(self._library_item_changed)
         layout.addWidget(self.library)
 
         hint = QLabel("Drag SBS, MPO, JPEG, PNG, or DNG files here.")
@@ -820,15 +835,9 @@ class StereoDandifierWindow(QMainWindow):
         item = QListWidgetItem(project_image.thumbnail_name)
         item.setIcon(pixmap)
         item.setFlags(
-            item.flags()
-            | Qt.ItemFlag.ItemIsUserCheckable
+            (item.flags() & ~Qt.ItemFlag.ItemIsUserCheckable)
             | Qt.ItemFlag.ItemIsSelectable
             | Qt.ItemFlag.ItemIsEnabled
-        )
-        item.setCheckState(
-            Qt.CheckState.Checked
-            if project_image.selected_for_export
-            else Qt.CheckState.Unchecked
         )
         item.setData(Qt.ItemDataRole.UserRole, image_index)
         item.setToolTip(
@@ -846,6 +855,7 @@ class StereoDandifierWindow(QMainWindow):
     def _select_library_item(self, current: QListWidgetItem | None, _previous):
         if current is None:
             self.current_index = None
+            self.remove_thumbnail_button.setEnabled(False)
             self._load_controls()
             self._refresh_previews(reset_view=True)
             return
@@ -853,23 +863,13 @@ class StereoDandifierWindow(QMainWindow):
         image_index = current.data(Qt.ItemDataRole.UserRole)
         if image_index is None:
             self.current_index = None
+            self.remove_thumbnail_button.setEnabled(False)
             self._load_controls()
             self._refresh_previews(reset_view=True)
             return
 
+        self.remove_thumbnail_button.setEnabled(True)
         self._select_image(image_index)
-
-    def _library_item_changed(self, item: QListWidgetItem):
-        image_index = item.data(Qt.ItemDataRole.UserRole)
-        if image_index is None:
-            return
-
-        self.images[image_index].selected_for_export = (
-            item.checkState() == Qt.CheckState.Checked
-        )
-        self.export_action.setEnabled(bool(self.selected_project_images()))
-        if image_index == self.current_index:
-            self._update_card_info()
 
     def _select_image(self, index: int):
         if index < 0 or index >= len(self.images):
@@ -881,6 +881,76 @@ class StereoDandifierWindow(QMainWindow):
         self._load_controls()
         self._refresh_previews(reset_view=True)
         self.statusBar().showMessage(f"Loaded: {self.current_image.display_name}")
+
+    def _remove_current_thumbnail(self):
+        item = self.library.currentItem()
+        if item is None:
+            return
+
+        image_index = item.data(Qt.ItemDataRole.UserRole)
+        if image_index is None:
+            return
+
+        row = self.library.row(item)
+        removed = self.images.pop(image_index)
+        self.library.blockSignals(True)
+        self.library.takeItem(row)
+        self._remove_orphan_file_separators()
+        self._reindex_library_items()
+        self._select_nearest_image_item(row)
+        self.library.blockSignals(False)
+
+        selected = self.library.currentItem()
+        if selected is None:
+            self.current_index = None
+            self.remove_thumbnail_button.setEnabled(False)
+            self._load_controls()
+            self._refresh_previews(reset_view=True)
+        else:
+            self._select_library_item(selected, None)
+
+        self.statusBar().showMessage(f"Removed: {removed.display_name}")
+
+    def _remove_orphan_file_separators(self):
+        row = 0
+        while row < self.library.count():
+            item = self.library.item(row)
+            if item.data(Qt.ItemDataRole.UserRole) is not None:
+                row += 1
+                continue
+
+            next_is_separator = (
+                row + 1 >= self.library.count()
+                or self.library.item(row + 1).data(Qt.ItemDataRole.UserRole) is None
+            )
+            if row == 0 or next_is_separator:
+                self.library.takeItem(row)
+                continue
+            row += 1
+
+    def _reindex_library_items(self):
+        image_index = 0
+        for row in range(self.library.count()):
+            item = self.library.item(row)
+            if item.data(Qt.ItemDataRole.UserRole) is None:
+                continue
+            item.setData(Qt.ItemDataRole.UserRole, image_index)
+            image_index += 1
+
+    def _select_nearest_image_item(self, start_row: int):
+        for row in range(start_row, self.library.count()):
+            item = self.library.item(row)
+            if item.data(Qt.ItemDataRole.UserRole) is not None:
+                self.library.setCurrentRow(row)
+                return
+
+        for row in range(min(start_row, self.library.count() - 1), -1, -1):
+            item = self.library.item(row)
+            if item.data(Qt.ItemDataRole.UserRole) is not None:
+                self.library.setCurrentRow(row)
+                return
+
+        self.library.setCurrentItem(None)
 
     @property
     def current_image(self) -> ProjectImage | None:
@@ -1058,7 +1128,7 @@ class StereoDandifierWindow(QMainWindow):
         self._refresh_previews()
 
     def selected_project_images(self) -> list[ProjectImage]:
-        return [image for image in self.images if image.selected_for_export]
+        return list(self.images)
 
     def _set_card_controls_enabled(self, enabled: bool):
         self.image_group.setEnabled(enabled)
@@ -1074,16 +1144,10 @@ class StereoDandifierWindow(QMainWindow):
         spec = CARD_FORMATS[current.settings.layout_template]
         card_w, card_h = spec.card_mm
         image_w, image_h = spec.image_mm
-        export_state = (
-            "Included in export"
-            if current.selected_for_export
-            else "Not included in export"
-        )
         self.card_info.setText(
             f"{current.display_name}\n"
             f"Source: {current.source.width} x {current.source.height} px\n"
-            f"Card: {card_w:g} x {card_h:g} mm; images: {image_w:g} x {image_h:g} mm\n"
-            f"{export_state}"
+            f"Card: {card_w:g} x {card_h:g} mm; images: {image_w:g} x {image_h:g} mm"
         )
 
     def _set_comfort(self, text: str):
@@ -1728,7 +1792,7 @@ def arched_top_depth(width: float, height: float) -> float:
 
 
 def rounded_corner_radius(width: float, height: float) -> float:
-    return max(1, min(width, height) * 0.08)
+    return max(1, min(width, height) * 0.04)
 
 
 def clamp(value: int, minimum: int, maximum: int) -> int:

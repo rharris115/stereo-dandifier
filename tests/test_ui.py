@@ -3,9 +3,9 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PIL import Image
-from PySide6.QtCore import QRectF, Qt
+from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QFont, QTextDocument
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QToolBar
 
 from stereo_dandifier.ui import (
     CaptionDialog,
@@ -19,6 +19,7 @@ from stereo_dandifier.ui import (
     export_page_layouts,
     left_thumbnail_image,
     resize_crop_box_for_handle,
+    rounded_corner_radius,
     window_shape_path,
     window_shapes_for_layout,
 )
@@ -47,6 +48,22 @@ def test_main_editor_defers_paper_choices_to_export():
     assert not hasattr(window, "paper_label")
 
 
+def test_thumbnail_pane_owns_import_and_remove_buttons():
+    app = QApplication.instance() or QApplication([])
+    window = StereoDandifierWindow()
+
+    toolbar_actions = [
+        action.text()
+        for toolbar in window.findChildren(QToolBar)
+        for action in toolbar.actions()
+    ]
+
+    assert app is not None
+    assert "Import Images" not in toolbar_actions
+    assert window.add_thumbnail_button.text() == "+"
+    assert window.remove_thumbnail_button.text() == "-"
+
+
 def test_export_dialog_hides_render_dpi_detail(tmp_path):
     app = QApplication.instance() or QApplication([])
     default_layout = default_page_layout()
@@ -71,7 +88,7 @@ def test_export_page_layouts_always_include_a4_and_letter():
     assert {"A4", "Letter"}.issubset(layouts)
 
 
-def test_library_uses_checkboxes_and_file_separators(tmp_path):
+def test_library_uses_file_separators_without_export_checkboxes(tmp_path):
     app = QApplication.instance() or QApplication([])
     first = tmp_path / "first.png"
     second = tmp_path / "second.png"
@@ -86,9 +103,28 @@ def test_library_uses_checkboxes_and_file_separators(tmp_path):
     assert window.library.item(0).text() == "Card"
     assert window.library.item(1).text() == "second.png"
     assert window.library.item(2).text() == "Card"
-    assert window.library.item(0).checkState() == Qt.CheckState.Checked
+    assert not window.library.item(0).flags() & Qt.ItemFlag.ItemIsUserCheckable
     assert window.library.item(1).flags() == Qt.ItemFlag.NoItemFlags
-    assert window.library.item(2).checkState() == Qt.CheckState.Checked
+    assert not window.library.item(2).flags() & Qt.ItemFlag.ItemIsUserCheckable
+
+
+def test_removing_thumbnail_removes_it_from_export_set(tmp_path):
+    app = QApplication.instance() or QApplication([])
+    first = tmp_path / "first.png"
+    second = tmp_path / "second.png"
+    Image.new("RGB", (8, 4), (255, 0, 0)).save(first)
+    Image.new("RGB", (8, 4), (0, 0, 255)).save(second)
+    window = StereoDandifierWindow()
+
+    window._import_paths([first, second])
+    window.library.setCurrentRow(0)
+    window._remove_current_thumbnail()
+
+    assert app is not None
+    assert [image.path for image in window.selected_project_images()] == [second]
+    assert window.library.count() == 1
+    assert window.library.item(0).text() == "Card"
+    assert window.current_image.path == second
 
 
 def test_card_editor_follows_single_thumbnail_selection(tmp_path):
@@ -395,8 +431,12 @@ def test_window_shape_path_supports_arched_top():
 def test_window_shape_path_supports_rounded_rectangle():
     path = window_shape_path(QRectF(10, 10, 40, 60), "Rectangle", round_corners=True)
 
-    assert not path.contains(QRectF(10, 10, 1, 1).center())
+    assert not path.contains(QPointF(10.1, 10.1))
     assert path.contains(QRectF(30, 10, 1, 1).center())
+
+
+def test_rounded_corner_radius_uses_subtle_rounding():
+    assert rounded_corner_radius(40, 60) == 1.6
 
 
 def text_fragments(caption_html: str):
