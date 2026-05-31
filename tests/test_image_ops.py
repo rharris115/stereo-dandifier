@@ -1,7 +1,7 @@
 import os
 
 import pytest
-from PIL import Image
+from PIL import Image, ImageDraw
 from PySide6.QtWidgets import QApplication
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -27,12 +27,16 @@ from stereo_dandifier.image_ops import (
     render_print_preview,
     save_pdf,
     save_pdf_pages,
+    score_comfort,
     source_metadata_dpi,
     split_stereo_pair,
     source_crop_box,
+    stereo_alignment_report,
     stereo_window_x_positions,
+    suggested_right_eye_transform,
     trim_transparent,
     trim_vertical_transparent,
+    vertical_translation_transform,
     visible_image_bottom,
     window_bounds_for_project,
     window_mask,
@@ -50,6 +54,23 @@ def test_split_stereo_pair_swaps_eyes_by_default():
 
     assert left.getpixel((0, 0)) == (0, 0, 255)
     assert right.getpixel((0, 0)) == (255, 0, 0)
+
+
+def test_split_stereo_pair_applies_rectification_transform_before_swap():
+    image = Image.new("RGB", (4, 4), (0, 0, 0))
+    image.paste((255, 0, 0), (0, 2, 2, 4))
+    image.paste((0, 0, 255), (2, 2, 4, 4))
+
+    left, right = split_stereo_pair(
+        image,
+        RenderSettings(
+            swap_eyes=False,
+            right_eye_transform=vertical_translation_transform(-2),
+        ),
+    )
+
+    assert left.getpixel((0, 2)) == (255, 0, 0)
+    assert right.getpixel((0, 0)) == (0, 0, 255)
 
 
 @pytest.mark.parametrize("name,spec", CARD_FORMATS.items())
@@ -373,6 +394,40 @@ def test_colour_mode_can_adjust_saturation():
     assert styled.getpixel((0, 0)) != source.getpixel((0, 0))
 
 
+def test_stereo_alignment_report_detects_vertical_offset():
+    source = synthetic_stereo_pair(vertical_offset=4)
+
+    report = stereo_alignment_report(source, RenderSettings(swap_eyes=False))
+
+    assert report.vertical_offset_px == pytest.approx(4, abs=0.25)
+    assert report.confidence >= 0.35
+
+
+def test_comfort_status_warns_about_rectification_issue():
+    source = synthetic_stereo_pair(vertical_offset=4)
+
+    score = score_comfort(source, RenderSettings(swap_eyes=False))
+
+    assert score.startswith("Poor - vertical alignment off by")
+
+
+def test_suggested_right_eye_transform_corrects_rectification_issue():
+    source = synthetic_stereo_pair(vertical_offset=4)
+    settings = RenderSettings(swap_eyes=True)
+
+    transform = suggested_right_eye_transform(source, settings)
+    rectified_settings = RenderSettings(swap_eyes=True, right_eye_transform=transform)
+
+    assert transform == vertical_translation_transform(-4)
+    assert score_comfort(source, rectified_settings) == "Excellent"
+
+
+def test_comfort_status_ignores_textureless_alignment_analysis():
+    source = Image.new("RGB", (320, 100), (120, 130, 140))
+
+    assert score_comfort(source, RenderSettings(swap_eyes=False)) == "Excellent"
+
+
 def test_print_preview_places_card_on_paper_with_blue_cut_guides():
     card = Image.new("RGB", (300, 120), (255, 255, 255))
     page_layout = page_layout_for_name("A4")
@@ -451,6 +506,27 @@ def alpha_line_clusters(image: Image.Image) -> list[tuple[int, int]]:
         else:
             clusters[-1] = (clusters[-1][0], y)
     return clusters
+
+
+def synthetic_stereo_pair(vertical_offset: int = 0) -> Image.Image:
+    left = Image.new("RGB", (160, 100), (128, 128, 128))
+    draw = ImageDraw.Draw(left)
+    features = [
+        (20, 20, 8, (250, 250, 250)),
+        (90, 30, 7, (10, 10, 10)),
+        (50, 75, 10, (240, 240, 240)),
+        (130, 60, 5, (20, 20, 20)),
+    ]
+    for x, y, radius, colour in features:
+        draw.ellipse((x - radius, y - radius, x + radius, y + radius), fill=colour)
+
+    right = Image.new("RGB", left.size, (128, 128, 128))
+    right.paste(left, (7, vertical_offset))
+
+    source = Image.new("RGB", (left.width + right.width, left.height), (128, 128, 128))
+    source.paste(left, (0, 0))
+    source.paste(right, (left.width, 0))
+    return source
 
 
 def non_white_bbox(

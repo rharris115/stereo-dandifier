@@ -1,3 +1,5 @@
+from dataclasses import dataclass, replace
+
 from PIL import Image, ImageDraw, ImageEnhance
 from PIL.ImageQt import fromqimage
 from PySide6.QtCore import QRectF, QSizeF
@@ -11,6 +13,16 @@ PDF_IMAGE_SAVE_OPTIONS = {
     "quality": 100,
     "subsampling": 0,
 }
+RECTIFICATION_WARNING_OFFSET_PX = 2.0
+RECTIFICATION_BORDERLINE_OFFSET_PX = 0.8
+RECTIFICATION_MIN_CONFIDENCE = 0.35
+
+
+@dataclass(frozen=True)
+class StereoAlignmentReport:
+    vertical_offset_px: float | None
+    confidence: float
+    method: str
 
 
 def split_stereo_pair(
@@ -20,6 +32,9 @@ def split_stereo_pair(
     midpoint = width // 2
     left = image.crop((0, 0, midpoint, height))
     right = image.crop((midpoint, 0, width, height))
+
+    if settings.right_eye_transform:
+        right = apply_rectification_transform(right, settings.right_eye_transform)
 
     if settings.convergence:
         left = horizontal_shift(left, settings.convergence)
@@ -36,6 +51,28 @@ def horizontal_shift(image: Image.Image, pixels: int) -> Image.Image:
     shifted = Image.new("RGB", image.size, (245, 241, 232))
     shifted.paste(image, (pixels, 0))
     return shifted
+
+
+def apply_rectification_transform(
+    image: Image.Image, transform: tuple[float, ...]
+) -> Image.Image:
+    if len(transform) == 6:
+        return image.transform(
+            image.size,
+            Image.Transform.AFFINE,
+            transform,
+            resample=Image.Resampling.BICUBIC,
+            fillcolor=(245, 241, 232),
+        )
+    if len(transform) == 8:
+        return image.transform(
+            image.size,
+            Image.Transform.PERSPECTIVE,
+            transform,
+            resample=Image.Resampling.BICUBIC,
+            fillcolor=(245, 241, 232),
+        )
+    return image
 
 
 def apply_style(image: Image.Image, settings: RenderSettings) -> Image.Image:
@@ -701,6 +738,19 @@ def draw_window_boundary(
 
 
 def score_comfort(image: Image.Image, settings: RenderSettings) -> str:
+    alignment = stereo_alignment_report(image, settings)
+    if (
+        alignment.vertical_offset_px is not None
+        and alignment.confidence >= RECTIFICATION_MIN_CONFIDENCE
+    ):
+        offset = abs(alignment.vertical_offset_px)
+        warning_offset = rectification_warning_offset_px(image.height)
+        borderline_offset = rectification_borderline_offset_px(image.height)
+        if offset >= warning_offset:
+            return f"Poor - vertical alignment off by {offset:.1f}px"
+        if offset >= borderline_offset:
+            return f"Borderline - vertical alignment off by {offset:.1f}px"
+
     width, height = image.size
     if width < height:
         return "Borderline - portrait source"
@@ -709,3 +759,313 @@ def score_comfort(image: Image.Image, settings: RenderSettings) -> str:
     if width / max(height, 1) < 1.7:
         return "Good - check stereo split"
     return "Excellent"
+
+
+def rectification_warning_offset_px(eye_height: int) -> float:
+    return max(RECTIFICATION_WARNING_OFFSET_PX, eye_height * 0.003)
+
+
+def rectification_borderline_offset_px(eye_height: int) -> float:
+    return max(RECTIFICATION_BORDERLINE_OFFSET_PX, eye_height * 0.001)
+
+
+def stereo_alignment_report(
+    image: Image.Image, settings: RenderSettings
+) -> StereoAlignmentReport:
+    left, right = split_stereo_pair(image, settings)
+    report = opencv_stereo_alignment_report(left, right)
+    if report is not None:
+        return report
+    return correlation_stereo_alignment_report(left, right)
+
+
+def suggested_right_eye_transform(
+    image: Image.Image, settings: RenderSettings
+) -> tuple[float, ...] | None:
+    source_settings = replace(settings, swap_eyes=False, right_eye_transform=None)
+    left, right = split_stereo_pair(image, source_settings)
+    transform = opencv_right_eye_rectification_transform(left, right)
+    if transform is not None:
+        return transform
+
+    report = stereo_alignment_report(image, source_settings)
+    if (
+        report.vertical_offset_px is None
+        or report.confidence < RECTIFICATION_MIN_CONFIDENCE
+    ):
+        return None
+    return vertical_translation_transform(-round(report.vertical_offset_px))
+
+
+def vertical_translation_transform(pixels: int) -> tuple[float, ...]:
+    return (1.0, 0.0, 0.0, 0.0, 1.0, float(-pixels))
+
+
+def opencv_right_eye_rectification_transform(
+    left: Image.Image, right: Image.Image
+) -> tuple[float, ...] | None:
+    try:
+        import cv2
+        import numpy as np
+    except ImportError:
+        return None
+
+    left_gray, scale = cv2_grayscale(left, cv2, np)
+    right_gray, _right_scale = cv2_grayscale(right, cv2, np)
+    left_points, right_points = matched_feature_points(left_gray, right_gray, cv2, np)
+    if left_points is None or right_points is None or len(left_points) < 8:
+        return None
+
+    affine, inliers = cv2.estimateAffinePartial2D(
+        right_points,
+        left_points,
+        method=cv2.RANSAC,
+        ransacReprojThreshold=2.5,
+        maxIters=3000,
+        confidence=0.995,
+    )
+    if affine is not None and ransac_inlier_count(inliers) >= 8:
+        return cv2_affine_to_pillow_inverse(affine, scale, np)
+
+    homography, inliers = cv2.findHomography(
+        right_points,
+        left_points,
+        method=cv2.RANSAC,
+        ransacReprojThreshold=3.0,
+        maxIters=3000,
+        confidence=0.995,
+    )
+    if homography is not None and ransac_inlier_count(inliers) >= 10:
+        return cv2_homography_to_pillow_inverse(homography, scale, np)
+
+    return None
+
+
+def matched_feature_points(left_gray, right_gray, cv2, np):
+    if hasattr(cv2, "SIFT_create"):
+        detector = cv2.SIFT_create(nfeatures=1600)
+        norm = cv2.NORM_L2
+    else:
+        detector = cv2.ORB_create(nfeatures=1600)
+        norm = cv2.NORM_HAMMING
+
+    left_keypoints, left_descriptors = detector.detectAndCompute(left_gray, None)
+    right_keypoints, right_descriptors = detector.detectAndCompute(right_gray, None)
+    if left_descriptors is None or right_descriptors is None:
+        return None, None
+    if len(left_keypoints) < 12 or len(right_keypoints) < 12:
+        return None, None
+
+    matcher = cv2.BFMatcher(norm)
+    matches = matcher.knnMatch(right_descriptors, left_descriptors, k=2)
+    left_points = []
+    right_points = []
+    for pair in matches:
+        if len(pair) != 2:
+            continue
+        best, second = pair
+        if best.distance >= second.distance * 0.75:
+            continue
+        right_point = right_keypoints[best.queryIdx].pt
+        left_point = left_keypoints[best.trainIdx].pt
+        right_points.append(right_point)
+        left_points.append(left_point)
+
+    if len(left_points) < 8:
+        return None, None
+    return (
+        np.asarray(left_points, dtype=np.float32),
+        np.asarray(right_points, dtype=np.float32),
+    )
+
+
+def ransac_inlier_count(inliers) -> int:
+    if inliers is None:
+        return 0
+    return int(inliers.sum())
+
+
+def cv2_affine_to_pillow_inverse(affine, scale: float, np) -> tuple[float, ...] | None:
+    source_to_dest = np.vstack([affine, [0.0, 0.0, 1.0]])
+    source_to_dest = unscale_transform(source_to_dest, scale, np)
+    try:
+        dest_to_source = np.linalg.inv(source_to_dest)
+    except np.linalg.LinAlgError:
+        return None
+    return tuple(float(value) for value in dest_to_source[:2, :].reshape(6))
+
+
+def cv2_homography_to_pillow_inverse(
+    homography, scale: float, np
+) -> tuple[float, ...] | None:
+    source_to_dest = unscale_transform(homography, scale, np)
+    try:
+        dest_to_source = np.linalg.inv(source_to_dest)
+    except np.linalg.LinAlgError:
+        return None
+    dest_to_source = dest_to_source / dest_to_source[2, 2]
+    return tuple(float(value) for value in dest_to_source.reshape(9)[:8])
+
+
+def unscale_transform(transform, scale: float, np):
+    if scale == 1.0:
+        return transform
+    scaled_to_source = np.diag([scale, scale, 1.0])
+    source_to_scaled = np.diag([1 / scale, 1 / scale, 1.0])
+    return source_to_scaled @ transform @ scaled_to_source
+
+
+def opencv_stereo_alignment_report(
+    left: Image.Image, right: Image.Image
+) -> StereoAlignmentReport | None:
+    try:
+        import cv2
+        import numpy as np
+    except ImportError:
+        return None
+
+    left_gray, scale = cv2_grayscale(left, cv2, np)
+    right_gray, _right_scale = cv2_grayscale(right, cv2, np)
+    orb = cv2.ORB_create(nfeatures=1200)
+    left_keypoints, left_descriptors = orb.detectAndCompute(left_gray, None)
+    right_keypoints, right_descriptors = orb.detectAndCompute(right_gray, None)
+    if left_descriptors is None or right_descriptors is None:
+        return None
+    if len(left_keypoints) < 12 or len(right_keypoints) < 12:
+        return None
+
+    matcher = cv2.BFMatcher(cv2.NORM_HAMMING)
+    matches = matcher.knnMatch(left_descriptors, right_descriptors, k=2)
+    vertical_offsets = []
+    for pair in matches:
+        if len(pair) != 2:
+            continue
+        best, second = pair
+        if best.distance >= second.distance * 0.75:
+            continue
+        left_point = left_keypoints[best.queryIdx].pt
+        right_point = right_keypoints[best.trainIdx].pt
+        vertical_offsets.append(right_point[1] - left_point[1])
+
+    if len(vertical_offsets) < 8:
+        return None
+
+    offsets = np.asarray(vertical_offsets, dtype=np.float32)
+    median = float(np.median(offsets))
+    deviations = np.abs(offsets - median)
+    inliers = offsets[deviations <= 2.5]
+    if len(inliers) < 6:
+        return None
+
+    refined = float(np.median(inliers)) / scale
+    confidence = min(1.0, len(inliers) / 30) * max(
+        0.0, 1.0 - float(np.std(inliers)) / 3
+    )
+    return StereoAlignmentReport(refined, confidence, "opencv-orb")
+
+
+def cv2_grayscale(image: Image.Image, cv2, np, max_width: int = 800):
+    source = image.convert("RGB")
+    scale = 1.0
+    if source.width > max_width:
+        scale = max_width / source.width
+        height = max(1, round(source.height * scale))
+        source = source.resize((max_width, height), Image.Resampling.BILINEAR)
+    array = np.asarray(source)
+    return cv2.cvtColor(array, cv2.COLOR_RGB2GRAY), scale
+
+
+def correlation_stereo_alignment_report(
+    left: Image.Image, right: Image.Image
+) -> StereoAlignmentReport:
+    try:
+        import numpy as np
+    except ImportError:
+        return StereoAlignmentReport(None, 0.0, "unavailable")
+
+    left_array, scale = downsampled_luminance(left, np)
+    right_array, _right_scale = downsampled_luminance(right, np)
+    if left_array.shape != right_array.shape:
+        return StereoAlignmentReport(None, 0.0, "correlation")
+
+    gradient_left = vertical_gradient(left_array, np)
+    gradient_right = vertical_gradient(right_array, np)
+    if float(np.std(gradient_left)) < 0.01 or float(np.std(gradient_right)) < 0.01:
+        return StereoAlignmentReport(None, 0.0, "correlation")
+
+    max_vertical_shift = max(1, min(10, round(left_array.shape[0] * 0.04)))
+    max_horizontal_shift = max(2, min(24, round(left_array.shape[1] * 0.08)))
+    scores: list[tuple[float, int, int]] = []
+    for vertical_shift in range(-max_vertical_shift, max_vertical_shift + 1):
+        best_for_vertical = -1.0
+        best_horizontal_shift = 0
+        for horizontal_shift in range(-max_horizontal_shift, max_horizontal_shift + 1):
+            score = shifted_normalised_correlation(
+                gradient_left,
+                gradient_right,
+                horizontal_shift,
+                vertical_shift,
+                np,
+            )
+            if score > best_for_vertical:
+                best_for_vertical = score
+                best_horizontal_shift = horizontal_shift
+        scores.append((best_for_vertical, vertical_shift, best_horizontal_shift))
+
+    best_score, best_vertical_shift, _best_horizontal_shift = max(
+        scores, key=lambda item: item[0]
+    )
+    competing_scores = [
+        score
+        for score, vertical_shift, _horizontal_shift in scores
+        if vertical_shift != best_vertical_shift
+    ]
+    next_best = max(competing_scores) if competing_scores else -1.0
+    confidence = max(0.0, min(1.0, (best_score - next_best) * 8))
+    return StereoAlignmentReport(best_vertical_shift / scale, confidence, "correlation")
+
+
+def downsampled_luminance(image: Image.Image, np, max_width: int = 360):
+    gray = image.convert("L")
+    scale = 1.0
+    if gray.width > max_width:
+        scale = max_width / gray.width
+        height = max(1, round(gray.height * scale))
+        gray = gray.resize((max_width, height), Image.Resampling.BILINEAR)
+    array = np.asarray(gray, dtype=np.float32) / 255.0
+    return array, scale
+
+
+def vertical_gradient(array, np):
+    gradient = np.zeros_like(array)
+    gradient[1:-1, :] = array[2:, :] - array[:-2, :]
+    return gradient
+
+
+def shifted_normalised_correlation(left, right, dx: int, dy: int, np) -> float:
+    left_crop, right_crop = overlapping_shifted_regions(left, right, dx, dy)
+    if left_crop.size < 100 or right_crop.size < 100:
+        return -1.0
+
+    left_values = left_crop.ravel()
+    right_values = right_crop.ravel()
+    left_values = left_values - float(np.mean(left_values))
+    right_values = right_values - float(np.mean(right_values))
+    denominator = float(np.linalg.norm(left_values) * np.linalg.norm(right_values))
+    if denominator <= 0:
+        return -1.0
+    return float(np.dot(left_values, right_values) / denominator)
+
+
+def overlapping_shifted_regions(left, right, dx: int, dy: int):
+    height, width = left.shape
+    left_x0 = max(0, -dx)
+    right_x0 = max(0, dx)
+    overlap_w = width - abs(dx)
+    left_y0 = max(0, -dy)
+    right_y0 = max(0, dy)
+    overlap_h = height - abs(dy)
+    return (
+        left[left_y0 : left_y0 + overlap_h, left_x0 : left_x0 + overlap_w],
+        right[right_y0 : right_y0 + overlap_h, right_x0 : right_x0 + overlap_w],
+    )

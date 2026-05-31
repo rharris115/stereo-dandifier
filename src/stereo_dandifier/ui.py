@@ -66,6 +66,7 @@ from stereo_dandifier.image_ops import (
     effective_window_shape,
     source_crop_box,
     split_stereo_pair,
+    suggested_right_eye_transform,
     window_bounds_for_project,
 )
 from stereo_dandifier.importer import load_project_images
@@ -596,10 +597,10 @@ class StereoDandifierWindow(QMainWindow):
         self.convergence = self._make_slider(-40, 40, 0)
         image_layout.addRow(self.swap_eyes)
         image_layout.addRow("Convergence", self.convergence)
-        auto_rectify = QPushButton("Auto Rectify")
-        auto_rectify.setEnabled(False)
-        auto_rectify.setToolTip("Planned for the next stereo correction milestone.")
-        image_layout.addRow(auto_rectify)
+        self.auto_rectify = QPushButton("Auto Rectify")
+        self.auto_rectify.setToolTip("Detect and correct vertical eye alignment.")
+        self.auto_rectify.clicked.connect(self.auto_rectify_current_image)
+        image_layout.addRow(self.auto_rectify)
         layout.addWidget(self.image_group)
 
         self.card_group = QGroupBox("Card")
@@ -1058,8 +1059,30 @@ class StereoDandifierWindow(QMainWindow):
             saturation=self.saturation.value(),
             sepia_strength=self.sepia_strength.value(),
             convergence=self.convergence.value(),
+            right_eye_transform=current.settings.right_eye_transform,
         )
         self._refresh_previews()
+
+    def auto_rectify_current_image(self):
+        current = self.current_image
+        if current is None:
+            return
+
+        right_eye_transform = suggested_right_eye_transform(
+            current.source, current.settings
+        )
+        if right_eye_transform is None:
+            self.statusBar().showMessage(
+                "Could not detect a reliable rectification transform"
+            )
+            return
+
+        current.settings = replace(
+            current.settings,
+            right_eye_transform=right_eye_transform,
+        )
+        self._refresh_previews(reset_view=True)
+        self.statusBar().showMessage("Applied right-eye rectification transform")
 
     def _refresh_previews(self, reset_view: bool = False):
         self.export_action.setEnabled(bool(self.selected_project_images()))

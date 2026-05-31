@@ -38,6 +38,7 @@ class RenderSettings:
     saturation: int = 0
     sepia_strength: int = 45
     convergence: int = 0
+    right_eye_transform: tuple[float, ...] | None = None
 
 
 @dataclass
