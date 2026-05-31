@@ -330,6 +330,7 @@ def test_properties_pane_does_not_include_caption_editor(tmp_path):
     assert not hasattr(window, "caption")
     assert not hasattr(window, "caption_position")
     assert not hasattr(window, "window_editor")
+    assert not hasattr(window, "convergence")
 
 
 def test_card_preview_gets_caption_hotspot(tmp_path):

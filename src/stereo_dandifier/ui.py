@@ -6,7 +6,7 @@ from typing import Callable
 from PIL import Image
 from PIL.ImageQt import ImageQt
 
-from PySide6.QtCore import QPoint, QRectF, QSize, Qt
+from PySide6.QtCore import QCoreApplication, QPoint, QRectF, QSize, Qt
 from PySide6.QtGui import (
     QAction,
     QBrush,
@@ -42,6 +42,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QButtonGroup,
+    QProgressDialog,
     QPushButton,
     QSlider,
     QSpinBox,
@@ -597,9 +598,7 @@ class StereoDandifierWindow(QMainWindow):
         image_layout = QFormLayout(self.image_group)
         self.swap_eyes = QCheckBox("Swap eyes for cross-eyed preview")
         self.swap_eyes.toggled.connect(self._controls_changed)
-        self.convergence = self._make_slider(-40, 40, 0, affects_comfort=True)
         image_layout.addRow(self.swap_eyes)
-        image_layout.addRow("Convergence", self.convergence)
         self.auto_rectify = QPushButton("Stereo Rectify")
         self.auto_rectify.setToolTip("Detect and correct vertical eye alignment.")
         self.auto_rectify.clicked.connect(self.auto_rectify_current_image)
@@ -1006,7 +1005,6 @@ class StereoDandifierWindow(QMainWindow):
         self.contrast.setValue(settings.contrast)
         self.saturation.setValue(settings.saturation)
         self.sepia_strength.setValue(settings.sepia_strength)
-        self.convergence.setValue(settings.convergence)
         self._update_tone_controls(settings.tone_mode)
         self._updating_controls = False
         self._update_card_info()
@@ -1087,7 +1085,7 @@ class StereoDandifierWindow(QMainWindow):
             contrast=self.contrast.value(),
             saturation=self.saturation.value(),
             sepia_strength=self.sepia_strength.value(),
-            convergence=self.convergence.value(),
+            convergence=current.settings.convergence,
             right_eye_transform=current.settings.right_eye_transform,
         )
         self._refresh_previews(recalculate_comfort=recalculate_comfort)
@@ -1097,9 +1095,27 @@ class StereoDandifierWindow(QMainWindow):
         if current is None:
             return
 
-        right_eye_transform = suggested_right_eye_transform(
-            current.source, current.settings
+        progress = QProgressDialog(
+            "Detecting stereo rectification...",
+            None,
+            0,
+            0,
+            self,
         )
+        progress.setWindowTitle("Stereo Rectify")
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.setCancelButton(None)
+        progress.show()
+        QCoreApplication.processEvents()
+
+        try:
+            right_eye_transform = suggested_right_eye_transform(
+                current.source, current.settings
+            )
+        finally:
+            progress.close()
+
         if right_eye_transform is None:
             self.statusBar().showMessage(
                 "Could not detect a reliable rectification transform"
