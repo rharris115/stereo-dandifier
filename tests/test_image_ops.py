@@ -1,5 +1,6 @@
 import os
 
+import numpy as np
 import pytest
 from PIL import Image, ImageDraw
 from PySide6.QtWidgets import QApplication
@@ -418,7 +419,9 @@ def test_suggested_right_eye_transform_corrects_rectification_issue():
     transform = suggested_right_eye_transform(source, settings)
     rectified_settings = RenderSettings(swap_eyes=True, right_eye_transform=transform)
 
-    assert transform == vertical_translation_transform(-4)
+    assert transform is not None
+    assert len(transform) in {6, 9}
+    assert transform[5] == pytest.approx(-4, abs=0.5)
     assert score_comfort(source, rectified_settings) == "Excellent"
 
 
@@ -509,19 +512,21 @@ def alpha_line_clusters(image: Image.Image) -> list[tuple[int, int]]:
 
 
 def synthetic_stereo_pair(vertical_offset: int = 0) -> Image.Image:
-    left = Image.new("RGB", (160, 100), (128, 128, 128))
+    rng = np.random.default_rng(123)
+    left = Image.fromarray(
+        rng.integers(0, 256, (160, 220, 3), dtype=np.uint8),
+        mode="RGB",
+    )
     draw = ImageDraw.Draw(left)
-    features = [
-        (20, 20, 8, (250, 250, 250)),
-        (90, 30, 7, (10, 10, 10)),
-        (50, 75, 10, (240, 240, 240)),
-        (130, 60, 5, (20, 20, 20)),
-    ]
-    for x, y, radius, colour in features:
+    for _index in range(40):
+        x = int(rng.integers(5, 200))
+        y = int(rng.integers(5, 145))
+        radius = int(rng.integers(2, 7))
+        colour = tuple(int(value) for value in rng.integers(0, 256, 3))
         draw.ellipse((x - radius, y - radius, x + radius, y + radius), fill=colour)
 
     right = Image.new("RGB", left.size, (128, 128, 128))
-    right.paste(left, (7, vertical_offset))
+    right.paste(left, (9, vertical_offset))
 
     source = Image.new("RGB", (left.width + right.width, left.height), (128, 128, 128))
     source.paste(left, (0, 0))

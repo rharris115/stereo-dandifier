@@ -1,5 +1,14 @@
 from dataclasses import dataclass, replace
 
+try:
+    import cv2
+    import numpy as np
+except ImportError as exc:
+    raise RuntimeError(
+        "OpenCV is required for StereoDandifier image operations. "
+        "Run `uv sync` or reinstall the project dependencies."
+    ) from exc
+
 from PIL import Image, ImageDraw, ImageEnhance
 from PIL.ImageQt import fromqimage
 from PySide6.QtCore import QRectF, QSizeF
@@ -56,23 +65,46 @@ def horizontal_shift(image: Image.Image, pixels: int) -> Image.Image:
 def apply_rectification_transform(
     image: Image.Image, transform: tuple[float, ...]
 ) -> Image.Image:
+    source = np.asarray(image.convert("RGB"))
+    border_colour = (245, 241, 232)
+
     if len(transform) == 6:
-        return image.transform(
+        matrix = np.asarray(transform, dtype=np.float32).reshape(2, 3)
+        rectified = cv2.warpAffine(
+            source,
+            matrix,
             image.size,
-            Image.Transform.AFFINE,
-            transform,
-            resample=Image.Resampling.BICUBIC,
-            fillcolor=(245, 241, 232),
+            flags=cv2.INTER_LANCZOS4,
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=border_colour,
         )
+        return Image.fromarray(rectified)
+
     if len(transform) == 8:
-        return image.transform(
+        matrix = np.asarray((*transform, 1.0), dtype=np.float32).reshape(3, 3)
+        rectified = cv2.warpPerspective(
+            source,
+            matrix,
             image.size,
-            Image.Transform.PERSPECTIVE,
-            transform,
-            resample=Image.Resampling.BICUBIC,
-            fillcolor=(245, 241, 232),
+            flags=cv2.INTER_LANCZOS4,
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=border_colour,
         )
-    return image
+        return Image.fromarray(rectified)
+
+    if len(transform) == 9:
+        matrix = np.asarray(transform, dtype=np.float32).reshape(3, 3)
+        rectified = cv2.warpPerspective(
+            source,
+            matrix,
+            image.size,
+            flags=cv2.INTER_LANCZOS4,
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=border_colour,
+        )
+        return Image.fromarray(rectified)
+
+    raise ValueError(f"Unsupported rectification transform length: {len(transform)}")
 
 
 def apply_style(image: Image.Image, settings: RenderSettings) -> Image.Image:
@@ -776,7 +808,7 @@ def stereo_alignment_report(
     report = opencv_stereo_alignment_report(left, right)
     if report is not None:
         return report
-    return correlation_stereo_alignment_report(left, right)
+    return StereoAlignmentReport(None, 0.0, "opencv")
 
 
 def suggested_right_eye_transform(
@@ -784,35 +816,19 @@ def suggested_right_eye_transform(
 ) -> tuple[float, ...] | None:
     source_settings = replace(settings, swap_eyes=False, right_eye_transform=None)
     left, right = split_stereo_pair(image, source_settings)
-    transform = opencv_right_eye_rectification_transform(left, right)
-    if transform is not None:
-        return transform
-
-    report = stereo_alignment_report(image, source_settings)
-    if (
-        report.vertical_offset_px is None
-        or report.confidence < RECTIFICATION_MIN_CONFIDENCE
-    ):
-        return None
-    return vertical_translation_transform(-round(report.vertical_offset_px))
+    return opencv_right_eye_rectification_transform(left, right)
 
 
 def vertical_translation_transform(pixels: int) -> tuple[float, ...]:
-    return (1.0, 0.0, 0.0, 0.0, 1.0, float(-pixels))
+    return (1.0, 0.0, 0.0, 0.0, 1.0, float(pixels))
 
 
 def opencv_right_eye_rectification_transform(
     left: Image.Image, right: Image.Image
 ) -> tuple[float, ...] | None:
-    try:
-        import cv2
-        import numpy as np
-    except ImportError:
-        return None
-
-    left_gray, scale = cv2_grayscale(left, cv2, np)
-    right_gray, _right_scale = cv2_grayscale(right, cv2, np)
-    left_points, right_points = matched_feature_points(left_gray, right_gray, cv2, np)
+    left_gray, scale = cv2_grayscale(left)
+    right_gray, _right_scale = cv2_grayscale(right)
+    left_points, right_points = matched_feature_points(left_gray, right_gray)
     if left_points is None or right_points is None or len(left_points) < 8:
         return None
 
@@ -825,7 +841,7 @@ def opencv_right_eye_rectification_transform(
         confidence=0.995,
     )
     if affine is not None and ransac_inlier_count(inliers) >= 8:
-        return cv2_affine_to_pillow_inverse(affine, scale, np)
+        return cv2_affine_to_transform(affine, scale)
 
     homography, inliers = cv2.findHomography(
         right_points,
@@ -836,12 +852,12 @@ def opencv_right_eye_rectification_transform(
         confidence=0.995,
     )
     if homography is not None and ransac_inlier_count(inliers) >= 10:
-        return cv2_homography_to_pillow_inverse(homography, scale, np)
+        return cv2_homography_to_transform(homography, scale)
 
     return None
 
 
-def matched_feature_points(left_gray, right_gray, cv2, np):
+def matched_feature_points(left_gray, right_gray):
     if hasattr(cv2, "SIFT_create"):
         detector = cv2.SIFT_create(nfeatures=1600)
         norm = cv2.NORM_L2
@@ -885,29 +901,19 @@ def ransac_inlier_count(inliers) -> int:
     return int(inliers.sum())
 
 
-def cv2_affine_to_pillow_inverse(affine, scale: float, np) -> tuple[float, ...] | None:
+def cv2_affine_to_transform(affine, scale: float) -> tuple[float, ...]:
     source_to_dest = np.vstack([affine, [0.0, 0.0, 1.0]])
-    source_to_dest = unscale_transform(source_to_dest, scale, np)
-    try:
-        dest_to_source = np.linalg.inv(source_to_dest)
-    except np.linalg.LinAlgError:
-        return None
-    return tuple(float(value) for value in dest_to_source[:2, :].reshape(6))
+    source_to_dest = unscale_transform(source_to_dest, scale)
+    return tuple(float(value) for value in source_to_dest[:2, :].reshape(6))
 
 
-def cv2_homography_to_pillow_inverse(
-    homography, scale: float, np
-) -> tuple[float, ...] | None:
-    source_to_dest = unscale_transform(homography, scale, np)
-    try:
-        dest_to_source = np.linalg.inv(source_to_dest)
-    except np.linalg.LinAlgError:
-        return None
-    dest_to_source = dest_to_source / dest_to_source[2, 2]
-    return tuple(float(value) for value in dest_to_source.reshape(9)[:8])
+def cv2_homography_to_transform(homography, scale: float) -> tuple[float, ...]:
+    source_to_dest = unscale_transform(homography, scale)
+    source_to_dest = source_to_dest / source_to_dest[2, 2]
+    return tuple(float(value) for value in source_to_dest.reshape(9))
 
 
-def unscale_transform(transform, scale: float, np):
+def unscale_transform(transform, scale: float):
     if scale == 1.0:
         return transform
     scaled_to_source = np.diag([scale, scale, 1.0])
@@ -918,14 +924,8 @@ def unscale_transform(transform, scale: float, np):
 def opencv_stereo_alignment_report(
     left: Image.Image, right: Image.Image
 ) -> StereoAlignmentReport | None:
-    try:
-        import cv2
-        import numpy as np
-    except ImportError:
-        return None
-
-    left_gray, scale = cv2_grayscale(left, cv2, np)
-    right_gray, _right_scale = cv2_grayscale(right, cv2, np)
+    left_gray, scale = cv2_grayscale(left)
+    right_gray, _right_scale = cv2_grayscale(right)
     orb = cv2.ORB_create(nfeatures=1200)
     left_keypoints, left_descriptors = orb.detectAndCompute(left_gray, None)
     right_keypoints, right_descriptors = orb.detectAndCompute(right_gray, None)
@@ -964,7 +964,7 @@ def opencv_stereo_alignment_report(
     return StereoAlignmentReport(refined, confidence, "opencv-orb")
 
 
-def cv2_grayscale(image: Image.Image, cv2, np, max_width: int = 800):
+def cv2_grayscale(image: Image.Image, max_width: int = 800):
     source = image.convert("RGB")
     scale = 1.0
     if source.width > max_width:
@@ -973,99 +973,3 @@ def cv2_grayscale(image: Image.Image, cv2, np, max_width: int = 800):
         source = source.resize((max_width, height), Image.Resampling.BILINEAR)
     array = np.asarray(source)
     return cv2.cvtColor(array, cv2.COLOR_RGB2GRAY), scale
-
-
-def correlation_stereo_alignment_report(
-    left: Image.Image, right: Image.Image
-) -> StereoAlignmentReport:
-    try:
-        import numpy as np
-    except ImportError:
-        return StereoAlignmentReport(None, 0.0, "unavailable")
-
-    left_array, scale = downsampled_luminance(left, np)
-    right_array, _right_scale = downsampled_luminance(right, np)
-    if left_array.shape != right_array.shape:
-        return StereoAlignmentReport(None, 0.0, "correlation")
-
-    gradient_left = vertical_gradient(left_array, np)
-    gradient_right = vertical_gradient(right_array, np)
-    if float(np.std(gradient_left)) < 0.01 or float(np.std(gradient_right)) < 0.01:
-        return StereoAlignmentReport(None, 0.0, "correlation")
-
-    max_vertical_shift = max(1, min(10, round(left_array.shape[0] * 0.04)))
-    max_horizontal_shift = max(2, min(24, round(left_array.shape[1] * 0.08)))
-    scores: list[tuple[float, int, int]] = []
-    for vertical_shift in range(-max_vertical_shift, max_vertical_shift + 1):
-        best_for_vertical = -1.0
-        best_horizontal_shift = 0
-        for horizontal_shift in range(-max_horizontal_shift, max_horizontal_shift + 1):
-            score = shifted_normalised_correlation(
-                gradient_left,
-                gradient_right,
-                horizontal_shift,
-                vertical_shift,
-                np,
-            )
-            if score > best_for_vertical:
-                best_for_vertical = score
-                best_horizontal_shift = horizontal_shift
-        scores.append((best_for_vertical, vertical_shift, best_horizontal_shift))
-
-    best_score, best_vertical_shift, _best_horizontal_shift = max(
-        scores, key=lambda item: item[0]
-    )
-    competing_scores = [
-        score
-        for score, vertical_shift, _horizontal_shift in scores
-        if vertical_shift != best_vertical_shift
-    ]
-    next_best = max(competing_scores) if competing_scores else -1.0
-    confidence = max(0.0, min(1.0, (best_score - next_best) * 8))
-    return StereoAlignmentReport(best_vertical_shift / scale, confidence, "correlation")
-
-
-def downsampled_luminance(image: Image.Image, np, max_width: int = 360):
-    gray = image.convert("L")
-    scale = 1.0
-    if gray.width > max_width:
-        scale = max_width / gray.width
-        height = max(1, round(gray.height * scale))
-        gray = gray.resize((max_width, height), Image.Resampling.BILINEAR)
-    array = np.asarray(gray, dtype=np.float32) / 255.0
-    return array, scale
-
-
-def vertical_gradient(array, np):
-    gradient = np.zeros_like(array)
-    gradient[1:-1, :] = array[2:, :] - array[:-2, :]
-    return gradient
-
-
-def shifted_normalised_correlation(left, right, dx: int, dy: int, np) -> float:
-    left_crop, right_crop = overlapping_shifted_regions(left, right, dx, dy)
-    if left_crop.size < 100 or right_crop.size < 100:
-        return -1.0
-
-    left_values = left_crop.ravel()
-    right_values = right_crop.ravel()
-    left_values = left_values - float(np.mean(left_values))
-    right_values = right_values - float(np.mean(right_values))
-    denominator = float(np.linalg.norm(left_values) * np.linalg.norm(right_values))
-    if denominator <= 0:
-        return -1.0
-    return float(np.dot(left_values, right_values) / denominator)
-
-
-def overlapping_shifted_regions(left, right, dx: int, dy: int):
-    height, width = left.shape
-    left_x0 = max(0, -dx)
-    right_x0 = max(0, dx)
-    overlap_w = width - abs(dx)
-    left_y0 = max(0, -dy)
-    right_y0 = max(0, dy)
-    overlap_h = height - abs(dy)
-    return (
-        left[left_y0 : left_y0 + overlap_h, left_x0 : left_x0 + overlap_w],
-        right[right_y0 : right_y0 + overlap_h, right_x0 : right_x0 + overlap_w],
-    )
