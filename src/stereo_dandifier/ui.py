@@ -497,7 +497,7 @@ class StereoDandifierWindow(QMainWindow):
         root.addWidget(self._build_inspector())
         root.setSizes([240, 820, 300])
 
-        self.setStatusBar(QStatusBar())
+        self._build_status_bar()
         self._set_comfort("No image loaded")
 
     def _build_actions(self):
@@ -528,10 +528,12 @@ class StereoDandifierWindow(QMainWindow):
 
         toolbar.addAction(self.export_action)
 
+    def _build_status_bar(self):
+        status_bar = QStatusBar()
         self.comfort_label = QLabel()
         self.comfort_label.setObjectName("comfortLabel")
-        toolbar.addSeparator()
-        toolbar.addWidget(self.comfort_label)
+        status_bar.addPermanentWidget(self.comfort_label, 1)
+        self.setStatusBar(status_bar)
 
     def _build_library(self) -> QWidget:
         panel = QWidget()
@@ -597,7 +599,7 @@ class StereoDandifierWindow(QMainWindow):
         self.convergence = self._make_slider(-40, 40, 0)
         image_layout.addRow(self.swap_eyes)
         image_layout.addRow("Convergence", self.convergence)
-        self.auto_rectify = QPushButton("Auto Rectify")
+        self.auto_rectify = QPushButton("Stereo Rectify")
         self.auto_rectify.setToolTip("Detect and correct vertical eye alignment.")
         self.auto_rectify.clicked.connect(self.auto_rectify_current_image)
         image_layout.addRow(self.auto_rectify)
@@ -756,14 +758,28 @@ class StereoDandifierWindow(QMainWindow):
             }
             QGraphicsView#preview {
                 background: #ebe6dc;
-                border: 1px solid #d0c7b8;
+                border: 3px solid #d0c7b8;
                 border-radius: 8px;
                 color: #71685d;
             }
+            QGraphicsView#preview[comfortState="excellent"] {
+                border-color: #4f9d69;
+            }
+            QGraphicsView#preview[comfortState="good"] {
+                border-color: #8fb4a6;
+            }
+            QGraphicsView#preview[comfortState="borderline"] {
+                border-color: #d89b3d;
+            }
+            QGraphicsView#preview[comfortState="poor"] {
+                border-color: #c85c4a;
+            }
+            QGraphicsView#preview[comfortState="neutral"] {
+                border-color: #d0c7b8;
+            }
             QLabel#comfortLabel {
                 padding: 4px 10px;
-                border-radius: 12px;
-                background: #d8e7e0;
+                background: transparent;
                 color: #17382f;
                 font-weight: 700;
             }
@@ -1175,7 +1191,13 @@ class StereoDandifierWindow(QMainWindow):
 
     def _set_comfort(self, text: str):
         self.comfort_label.setText(f"Comfort: {text}")
-        self.statusBar().showMessage(text)
+        self._set_preview_comfort_state(comfort_state_for_text(text))
+
+    def _set_preview_comfort_state(self, state: str):
+        self.card_view.setProperty("comfortState", state)
+        self.card_view.style().unpolish(self.card_view)
+        self.card_view.style().polish(self.card_view)
+        self.card_view.update()
 
     def export_card(self):
         selected_images = self.selected_project_images()
@@ -1577,6 +1599,18 @@ def editor_dpi_for_image(project_image: ProjectImage) -> int:
         project_image.settings,
         minimum_dpi=MIN_CARD_EDITOR_DPI,
     )
+
+
+def comfort_state_for_text(text: str) -> str:
+    if text.startswith("Excellent"):
+        return "excellent"
+    if text.startswith("Good"):
+        return "good"
+    if text.startswith("Borderline"):
+        return "borderline"
+    if text.startswith("Poor"):
+        return "poor"
+    return "neutral"
 
 
 def caption_html_from_editor(editor: QTextEdit) -> str:

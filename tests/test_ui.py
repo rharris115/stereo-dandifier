@@ -14,6 +14,7 @@ from stereo_dandifier.ui import (
     StereoDandifierWindow,
     WindowDialog,
     ZoomableImageView,
+    comfort_state_for_text,
     editor_dpi_for_image,
     export_dpi_for_images,
     export_page_layouts,
@@ -62,6 +63,41 @@ def test_thumbnail_pane_owns_import_and_remove_buttons():
     assert "Import Images" not in toolbar_actions
     assert window.add_thumbnail_button.text() == "+"
     assert window.remove_thumbnail_button.text() == "-"
+
+
+def test_comfort_report_lives_in_bottom_status_bar():
+    app = QApplication.instance() or QApplication([])
+    window = StereoDandifierWindow()
+
+    toolbar_widgets = [
+        toolbar.widgetForAction(action)
+        for toolbar in window.findChildren(QToolBar)
+        for action in toolbar.actions()
+    ]
+
+    assert app is not None
+    assert window.statusBar() is not None
+    assert window.comfort_label not in toolbar_widgets
+    assert window.comfort_label.parent() is window.statusBar()
+    assert window.auto_rectify.text() == "Stereo Rectify"
+
+
+def test_comfort_state_controls_preview_border_state():
+    app = QApplication.instance() or QApplication([])
+    window = StereoDandifierWindow()
+
+    window._set_comfort("Poor - vertical alignment off by 4.0px")
+
+    assert app is not None
+    assert window.card_view.property("comfortState") == "poor"
+
+
+def test_comfort_state_for_text_maps_score_prefixes():
+    assert comfort_state_for_text("Excellent") == "excellent"
+    assert comfort_state_for_text("Good - check stereo split") == "good"
+    assert comfort_state_for_text("Borderline - strong convergence") == "borderline"
+    assert comfort_state_for_text("Poor - vertical alignment off by 4.0px") == "poor"
+    assert comfort_state_for_text("No thumbnail selected") == "neutral"
 
 
 def test_export_dialog_hides_render_dpi_detail(tmp_path):
